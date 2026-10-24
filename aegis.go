@@ -58,12 +58,19 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// samesame checks the method and URL the request arrived with, which
+	// Caddy stores before any handler runs, so a rewrite before this handler
+	// does not break the signature. Caddy stores no headers, so a header
+	// change before it still does.
+	orig := r.Context().Value(caddyhttp.OriginalRequestCtxKey).(http.Request)
+
 	// httpsign, samesame's signature engine, writes the scheme and host into
-	// the URL it verifies, so samesame gets a copy of r with its own URL.
-	// When a signature covers a trailer field, httpsign also reads the whole
-	// body, with no size limit, so the copy has no body.
+	// the URL it verifies, so samesame gets a copy of r with its own copy of
+	// the stored URL. When a signature covers a trailer field, httpsign also
+	// reads the whole body, with no size limit, so the copy has no body.
 	v := *r
-	u := *r.URL
+	u := *orig.URL
+	v.Method = orig.Method
 	v.URL = &u
 	v.Body = http.NoBody
 
