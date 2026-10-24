@@ -77,14 +77,64 @@ To route one agent, match the full URL of its key directory:
 @openai vars {web_bot_auth.agent} https://chatgpt.com/.well-known/http-message-signatures-directory
 ```
 
+## Modes
+
+`mode` decides which requests `web_bot_auth` blocks, by outcome. Unsigned
+requests are `unverified`.
+
+| Mode | `verified` | `invalid` | `unverified` |
+|---|---|---|---|
+| `observe` (default) | passed on | passed on | passed on |
+| `enforce` | passed on | blocked | passed on |
+| `require` | passed on | blocked | blocked with a challenge |
+
+A blocked request gets the status code samesame suggests for its reason: `400`
+for `malformed`, `429` for `replay`, and `403` for any other. A challenge is a
+`403` response with an `Accept-Signature` header that tells the agent how to
+sign its request.
+
+Start in `observe` and read the outcomes in the [access log](#access-log)
+before blocking anything. Correctly signed requests can still be `invalid`,
+for example through clock skew or a server in front of Caddy that changes a
+signed header.
+
+`enforce` never blocks `unverified` requests. A key directory that cannot be
+downloaded, or that lacks the signing key, says nothing against the agent, and
+blocking on it would let one outage of that key directory block the agent on
+every site that runs Aegis.
+
+`require` is for endpoints meant only for agents, such as an API or a feed.
+Scope it to them, never the whole site:
+
+```caddyfile
+example.com {
+	handle /feed/* {
+		web_bot_auth {
+			mode require
+		}
+		reverse_proxy feed:8080
+	}
+
+	handle {
+		web_bot_auth
+		reverse_proxy app:8080
+	}
+}
+```
+
+Blocked requests go through Caddy's error handling, so `handle_errors` can
+change the response, and the `{web_bot_auth.*}` placeholders are set there.
+
 ## Settings
 
-Every setting is optional. An absent setting keeps the default of
-[samesame](https://github.com/TecharoHQ/samesame), the library that checks the
-signatures; Aegis sets no defaults of its own.
+Every setting is optional. `mode` is described in [Modes](#modes). The others
+go to [samesame](https://github.com/TecharoHQ/samesame), the library that
+checks the signatures: an absent one keeps samesame's default, and Aegis sets
+no defaults of its own.
 
 ```caddyfile
 web_bot_auth {
+	mode                   observe|enforce|require
 	allowed_hosts          <host...>
 	fetch_timeout          <duration>
 	max_directory_size     <size>
@@ -152,6 +202,10 @@ log {
 	}
 }
 ```
+
+The filter covers only the access log. At `debug` level, Caddy's error log
+also records each request that `web_bot_auth` blocks, with its headers,
+including `Signature`.
 
 To see each request's outcome in the access log, add placeholders to its
 entries with `log_append`:
