@@ -36,6 +36,21 @@ example.com {
 placeholder, and passes the request on. Routes decide what each outcome gets:
 here, verified requests go to the app and all others to Anubis.
 
+## Placement
+
+`web_bot_auth` checks each signature against the method and URL the request
+arrived with, so `method`, `rewrite`, `uri`, `try_files` and `handle_path` do
+not break signatures, even when they run first.
+
+Headers are checked as they are when `web_bot_auth` runs, so a directive that
+changes a header the signature covers before then breaks the signature. For
+example, `request_header` setting `Host` makes the outcome `invalid`.
+
+In Caddy's default directive order, `web_bot_auth` runs before `method`, so
+before `rewrite`, `uri`, `try_files`, `request_header` and `handle_path`.
+Inside a `route` block, directives run in the order they are written, so put
+`web_bot_auth` first there.
+
 ## Placeholders
 
 `web_bot_auth` sets these placeholders on every request, for use in matchers,
