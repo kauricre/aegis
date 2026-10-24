@@ -26,8 +26,8 @@ func init() {
 var tweakFetcher func(*samesame.FetcherOptions)
 
 // Handler checks the Web Bot Auth signature of each request with samesame,
-// writes the outcome to the {web_bot_auth.outcome} placeholder, and passes the
-// request on.
+// writes the outcome and its details to the {web_bot_auth.*} placeholders, and
+// passes the request on.
 type Handler struct {
 	verifier *samesame.Verifier
 	logger   *zap.Logger
@@ -67,18 +67,78 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	v.URL = &u
 	v.Body = http.NoBody
 
-	_, err := h.verifier.Verify(&v)
+	res, err := h.verifier.Verify(&v)
 	outcome := samesame.OutcomeOf(err).String()
+	reason := reasonOf(err)
+	signed := !errors.Is(err, samesame.ErrNoSignature)
+	var agent, keyID, label string
+	if err == nil {
+		agent, keyID, label = res.Identifier.String(), res.KeyID, res.Label
+	}
 
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 	repl.Set("web_bot_auth.outcome", outcome)
+	repl.Set("web_bot_auth.signed", signed)
+	repl.Set("web_bot_auth.reason", reason)
+	repl.Set("web_bot_auth.agent", agent)
+	repl.Set("web_bot_auth.keyid", keyID)
+	repl.Set("web_bot_auth.label", label)
 
 	// Unsigned requests are most traffic, so only signed ones are logged.
-	if !errors.Is(err, samesame.ErrNoSignature) {
-		h.logger.Debug("checked signature", zap.String("outcome", outcome))
+	if signed {
+		remoteIP, _ := repl.GetString("http.request.remote.host")
+		h.logger.Debug("checked signature",
+			zap.String("outcome", outcome),
+			zap.String("reason", reason),
+			zap.String("agent", agent),
+			zap.String("keyid", keyID),
+			zap.String("label", label),
+			zap.Bool("signed", signed),
+			zap.String("remote_ip", remoteIP),
+		)
 	}
 
 	return next.ServeHTTP(w, r)
+}
+
+// reasonOf returns the short code for why samesame did not verify a request,
+// given the error it returned: empty when it verified, and other for an error
+// the module does not know.
+func reasonOf(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, samesame.ErrNoSignature):
+		return "no_signature"
+	case errors.Is(err, samesame.ErrMalformedSignature), errors.Is(err, samesame.ErrMalformedSignatureAgent):
+		return "malformed"
+	case errors.Is(err, samesame.ErrInsecureTransport):
+		return "insecure_transport"
+	case errors.Is(err, samesame.ErrProfile):
+		return "profile"
+	case errors.Is(err, samesame.ErrNotYetValid):
+		return "not_yet_valid"
+	case errors.Is(err, samesame.ErrExpired):
+		return "expired"
+	case errors.Is(err, samesame.ErrValidityTooLong):
+		return "validity_too_long"
+	case errors.Is(err, samesame.ErrBadSignature):
+		return "bad_signature"
+	case errors.Is(err, samesame.ErrKeyUnknown):
+		return "key_unknown"
+	case errors.Is(err, samesame.ErrDiscovery):
+		return "discovery_failed"
+	case errors.Is(err, samesame.ErrNonceRequired):
+		return "nonce_required"
+	case errors.Is(err, samesame.ErrReplay):
+		return "replay"
+	case errors.Is(err, samesame.ErrNonceStore):
+		return "nonce_store"
+	case errors.Is(err, samesame.ErrTooManySignatures):
+		return "too_many_signatures"
+	default:
+		return "other"
+	}
 }
 
 // Interface guards
