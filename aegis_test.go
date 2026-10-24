@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -980,5 +982,87 @@ func TestDirectivesShareNonces(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParallelRequestsDuringReload(t *testing.T) {
+	agent := newAgent(t)
+	s := serve(t, `
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	// samesame's signing transport gives every request a new signature and
+	// nonce. The client speaks HTTP/2: a server that shuts down closes its
+	// socket before it ends HTTP/2 connections, so no new connection waits on
+	// the first config's socket when the reload closes it, which on Linux
+	// resets such connections.
+	_, pool := localTLS()
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}, ForceAttemptHTTP2: true}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: agent.Transport(transport)}
+	send := func() (string, error) {
+		resp, err := client.Get(s.url)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		return string(body), err
+	}
+
+	// The senders send requests until the test stops them. The test reloads
+	// the config once the first config has answered a number of them, and
+	// stops them once the reloaded config has answered as many, or once one
+	// fails.
+	const senders, answers = 8, 50
+	var first, reloaded atomic.Int64
+	firstAnswered, reloadedAnswered, failed := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var failOnce sync.Once
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer close(stop)
+	for range senders {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				body, err := send()
+				switch {
+				case err == nil && body == "verified ":
+					if first.Add(1) == answers {
+						close(firstAnswered)
+					}
+				case err == nil && body == "reloaded: verified ":
+					if reloaded.Add(1) == answers {
+						close(reloadedAnswered)
+					}
+				default:
+					t.Errorf("response = %q, error %v; want verified", body, err)
+					failOnce.Do(func() { close(failed) })
+					return
+				}
+			}
+		})
+	}
+
+	select {
+	case <-firstAnswered:
+	case <-failed:
+		return
+	}
+	// The new fetch_timeout gives the reloaded config a new key cache, while
+	// both configs share the nonce store.
+	s.load(t, `
+	web_bot_auth {
+		fetch_timeout 3s
+	}
+	respond "reloaded: {web_bot_auth.outcome} {web_bot_auth.reason}"`)
+	select {
+	case <-reloadedAnswered:
+	case <-failed:
 	}
 }
