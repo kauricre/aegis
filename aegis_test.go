@@ -149,15 +149,74 @@ func TestRouteByAgent(t *testing.T) {
 	}
 }
 
+func TestSignatureSurvivesRewrites(t *testing.T) {
+	agent := newAgent(t)
+	for _, tc := range []struct {
+		name, directives string
+	}{
+		{"nothing before the module", `
+	web_bot_auth
+	respond "{web_bot_auth.outcome}"`},
+		{"method", `
+	route {
+		method POST
+		web_bot_auth
+		respond "{web_bot_auth.outcome}"
+	}`},
+		{"rewrite", `
+	route {
+		rewrite * /rewritten?x=1
+		web_bot_auth
+		respond "{web_bot_auth.outcome}"
+	}`},
+		{"uri", `
+	route {
+		uri strip_prefix /prefix
+		web_bot_auth
+		respond "{web_bot_auth.outcome}"
+	}`},
+		{"handle_path", `
+	handle_path /prefix/* {
+		web_bot_auth
+		respond "{web_bot_auth.outcome}"
+	}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := serve(t, tc.directives)
+			r := signMethodAndURL(t, agent, get(t, s.url+"/prefix/path?q=1"))
+			if got := s.send(t, r); got != "verified" {
+				t.Errorf("outcome = %q, want verified", got)
+			}
+		})
+	}
+}
+
+func TestHeaderChangeBeforeModuleBreaksSignature(t *testing.T) {
+	agent := newAgent(t)
+	// samesame accepts only signatures that cover @authority or @target-uri,
+	// and both include the Host header.
+	s := serve(t, `
+	route {
+		request_header Host example.com
+		web_bot_auth
+		respond "{web_bot_auth.outcome} {web_bot_auth.reason}"
+	}`)
+
+	if got := s.send(t, sign(t, agent, get(t, s.url))); got != "invalid bad_signature" {
+		t.Errorf("response = %q, want %q", got, "invalid bad_signature")
+	}
+}
+
 func TestNextHandlerSeesUnchangedURL(t *testing.T) {
 	agent := newAgent(t)
 	s := serve(t, `
 	web_bot_auth
 	templates
-	respond "{{.Req.URL}}"`)
+	respond "{{.Req.URL}} {{.OriginalReq.URL}}"`)
 
-	if got := s.send(t, sign(t, agent, get(t, s.url+"/path?q=1"))); got != "/path?q=1" {
-		t.Errorf("next handler saw URL %q, want /path?q=1", got)
+	// OriginalReq is Caddy's stored copy of the request as it arrived.
+	if got := s.send(t, sign(t, agent, get(t, s.url+"/path?q=1"))); got != "/path?q=1 /path?q=1" {
+		t.Errorf("next handler saw URL and original URL %q, want /path?q=1 /path?q=1", got)
 	}
 }
 

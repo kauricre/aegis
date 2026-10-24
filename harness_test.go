@@ -2,6 +2,7 @@ package aegis
 
 import (
 	"crypto"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -20,6 +21,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
+	"github.com/yaronf/httpsign"
 )
 
 // localTLS returns the certificate that every httptest TLS server uses and a
@@ -34,10 +36,11 @@ var localTLS = sync.OnceValues(func() (tls.Certificate, *x509.CertPool) {
 })
 
 // testAgent is samesame's signer for an agent, with the URL of the agent's key
-// directory.
+// directory and the agent's private key.
 type testAgent struct {
 	*samesame.Signer
 	directory string
+	key       ed25519.PrivateKey
 }
 
 // newAgent returns a new agent whose key directory is served from a local
@@ -67,7 +70,7 @@ func newAgent(t *testing.T) testAgent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return testAgent{signer, "https://" + authority + samesame.WellKnownPath}
+	return testAgent{signer, "https://" + authority + samesame.WellKnownPath, key.(ed25519.PrivateKey)}
 }
 
 // site is Caddy running in-process with one HTTPS site.
@@ -189,6 +192,34 @@ func sign(t *testing.T, agent testAgent, r *http.Request) *http.Request {
 	if err := agent.Sign(r); err != nil {
 		t.Fatal(err)
 	}
+	return r
+}
+
+// signMethodAndURL signs r as agent with httpsign, samesame's signature engine.
+// Unlike sign, the signature also covers r's method and full URL (@method and
+// @target-uri), which samesame's signer never covers, and has no nonce.
+func signMethodAndURL(t *testing.T, agent testAgent, r *http.Request) *http.Request {
+	t.Helper()
+	origin := strings.TrimSuffix(agent.directory, samesame.WellKnownPath)
+	r.Header.Set("Signature-Agent", fmt.Sprintf("%s=%q", samesame.DefaultLabel, origin))
+
+	cfg := httpsign.NewSignConfig().
+		SetTag(samesame.TagWebBotAuth).
+		SetKeyID(agent.KeyID()).
+		SetExpiresAfter(int64(samesame.DefaultExpiry.Seconds()))
+	fields := httpsign.NewFields().
+		AddHeaders("@method", "@target-uri", "@authority").
+		AddDictHeader("signature-agent", samesame.DefaultLabel)
+	signer, err := httpsign.NewEd25519Signer(agent.key, cfg, *fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, sig, err := httpsign.SignRequest(samesame.DefaultLabel, *signer, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Signature-Input", input)
+	r.Header.Set("Signature", sig)
 	return r
 }
 

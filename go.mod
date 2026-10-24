@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/TecharoHQ/samesame v1.0.0
 	github.com/caddyserver/caddy/v2 v2.11.7
+	github.com/yaronf/httpsign v0.6.1
 	go.uber.org/zap v1.28.0
 )
 
@@ -120,7 +121,6 @@ require (
 	github.com/urfave/cli v1.22.17 // indirect
 	github.com/valyala/fastjson v1.6.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/yaronf/httpsign v0.6.1 // indirect
 	github.com/yuin/goldmark v1.8.6 // indirect
 	github.com/yuin/goldmark-highlighting/v2 v2.0.0-20230729083705-37449abec8cc // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
