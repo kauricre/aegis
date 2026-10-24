@@ -2,12 +2,14 @@ package aegis
 
 import (
 	"cmp"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"reflect"
 	"slices"
@@ -722,5 +724,158 @@ func TestIdentityHeader(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// trustLoopback makes Caddy trust the test client as a proxy, so the client
+// plays a front server that ends TLS and sends plain HTTP to Caddy.
+const trustLoopback = `servers {
+		trusted_proxies static 127.0.0.1/32
+	}`
+
+func TestSchemeFromTrustedProxies(t *testing.T) {
+	agent := newAgent(t)
+
+	type request struct {
+		name  string
+		proto []string // the request's X-Forwarded-Proto lines, in order
+		want  string
+	}
+	for _, tc := range []struct {
+		name, scheme, global string
+		requests             []request
+	}{
+		{"plain HTTP from a trusted proxy", "http", trustLoopback, []request{
+			{"https", []string{"https"}, "verified "},
+			{"http", []string{"http"}, "invalid insecure_transport"},
+			{"wss", []string{"wss"}, "verified "},
+			{"http, then https", []string{"http", "https"}, "verified "},
+			{"https, then http", []string{"https", "http"}, "invalid insecure_transport"},
+			// The last line decides as a whole, as in Caddy's reverse_proxy.
+			{"http, https on one line", []string{"http, https"}, "invalid insecure_transport"},
+		}},
+		{"plain HTTP from a peer not in trusted_proxies", "http", "", []request{
+			{"https", []string{"https"}, "invalid insecure_transport"},
+		}},
+		{"HTTPS", "https", "", []request{
+			{"no X-Forwarded-Proto", nil, "verified "},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := serveSite(t, tc.scheme, tc.global, `
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+			for _, req := range tc.requests {
+				t.Run(req.name, func(t *testing.T) {
+					r := sign(t, agent, get(t, s.url))
+					for _, v := range req.proto {
+						r.Header.Add("X-Forwarded-Proto", v)
+					}
+					if got := s.send(t, r); got != req.want {
+						t.Errorf("response = %q, want %q", got, req.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestInsecureTransportWarning(t *testing.T) {
+	agent := newAgent(t)
+	for _, tc := range []struct {
+		name  string
+		proto []string // the requests' X-Forwarded-Proto lines
+		want  string
+	}{
+		{
+			"X-Forwarded-Proto from a peer not in trusted_proxies", []string{"https"},
+			"signed request over plain HTTP got insecure_transport: X-Forwarded-Proto was ignored because the peer is not a trusted proxy; add the front server to trusted_proxies, or set trusted_proxies_unix for a Unix socket",
+		},
+		{
+			"no X-Forwarded-Proto", nil,
+			"signed request over plain HTTP got insecure_transport: signatures need HTTPS; behind a front server that ends TLS, use re-encryption, or send X-Forwarded-Proto from a front server that Caddy trusts as a proxy (trusted_proxies, or trusted_proxies_unix for a Unix socket)",
+		},
+	} {
+		// Each subtest loads a new config, after which the module warns again.
+		t.Run(tc.name, func(t *testing.T) {
+			s := serveSite(t, "http", "", `
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+			for range 2 {
+				r := sign(t, agent, get(t, s.url))
+				for _, v := range tc.proto {
+					r.Header.Add("X-Forwarded-Proto", v)
+				}
+				if got := s.send(t, r); got != "invalid insecure_transport" {
+					t.Errorf("response = %q, want %q", got, "invalid insecure_transport")
+				}
+			}
+
+			type logEntry struct {
+				Level, Msg string
+				RemoteIP   string `json:"remote_ip"`
+			}
+			var got []logEntry
+			for line := range strings.Lines(s.logs(t)) {
+				var entry logEntry
+				if err := json.Unmarshal([]byte(line), &entry); err != nil {
+					t.Fatal(err)
+				}
+				if entry.Level == "warn" {
+					got = append(got, entry)
+				}
+			}
+			if want := []logEntry{{"warn", tc.want, "127.0.0.1"}}; !slices.Equal(got, want) {
+				t.Errorf("warnings = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestReencryptingFrontServer(t *testing.T) {
+	agent := newAgent(t)
+	s := serve(t, `
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	// The front server ends the client's TLS and opens its own TLS connection
+	// to Caddy, keeping Host, which the signature covers.
+	target, err := url.Parse(s.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pool := localTLS()
+	front := httptest.NewTLSServer(&httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(target)
+			r.Out.Host = r.In.Host
+		},
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
+	})
+	t.Cleanup(front.Close)
+
+	if got := s.send(t, sign(t, agent, get(t, front.URL))); got != "verified " {
+		t.Errorf("response = %q, want %q", got, "verified ")
+	}
+}
+
+func TestXForwardedHostIsIgnored(t *testing.T) {
+	agent := newAgent(t)
+	s := serveSite(t, "http", trustLoopback, `
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	// A trusted front server that replaced Host moved the host the agent
+	// signed to X-Forwarded-Host.
+	r := get(t, s.url)
+	r.Host = "example.com"
+	sign(t, agent, r)
+	r.Host = ""
+	r.Header.Set("X-Forwarded-Host", "example.com")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if got := s.send(t, r); got != "invalid bad_signature" {
+		t.Errorf("response = %q, want %q", got, "invalid bad_signature")
 	}
 }

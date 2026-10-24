@@ -80,16 +80,24 @@ func newAgent(t *testing.T) testAgent {
 	return testAgent{signer, "https://" + authority + samesame.WellKnownPath, key.(ed25519.PrivateKey), requests}
 }
 
-// site is Caddy running in-process with one HTTPS site.
+// site is Caddy running in-process with one site.
 type site struct {
 	url string
 	log string // file that receives the module's logs
 }
 
-// serve runs Caddy from a real Caddyfile whose only site, on a free local
-// port, holds directives. Caddy stops when the test ends. The config keeps
-// Caddy away from the user's own Caddy data and config directories.
+// serve runs Caddy with one HTTPS site that holds directives, as serveSite
+// does.
 func serve(t *testing.T, directives string) site {
+	t.Helper()
+	return serveSite(t, "https", "", directives)
+}
+
+// serveSite runs Caddy from a real Caddyfile whose only site, on a free local
+// port with scheme https or http, holds directives. global goes into the
+// global options. Caddy stops when the test ends. The config keeps Caddy away
+// from the user's own Caddy data and config directories.
+func serveSite(t *testing.T, scheme, global, directives string) site {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -110,7 +118,11 @@ func serve(t *testing.T, directives string) site {
 	}
 	t.Cleanup(func() { tweakFetcher = nil })
 
-	s := site{url: "https://" + freeAddr(t), log: filepath.Join(dir, "aegis.log")}
+	s := site{url: scheme + "://" + freeAddr(t), log: filepath.Join(dir, "aegis.log")}
+	var certs string
+	if scheme == "https" {
+		certs = "tls " + certFile + " " + keyFile
+	}
 	caddyfile := fmt.Sprintf(`{
 	admin off
 	persist_config off
@@ -118,6 +130,7 @@ func serve(t *testing.T, directives string) site {
 	storage_clean_interval off
 	auto_https off
 	default_bind 127.0.0.1
+	%s
 	log aegis {
 		output file %s
 		format json
@@ -127,10 +140,10 @@ func serve(t *testing.T, directives string) site {
 }
 
 %s {
-	tls %s %s
+	%s
 	%s
 }
-`, dir, s.log, s.url, certFile, keyFile, directives)
+`, dir, global, s.log, s.url, certs, directives)
 
 	cfg, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(caddyfile), nil)
 	if err != nil {
@@ -153,7 +166,7 @@ func (s site) send(t *testing.T, r *http.Request) string {
 	return body
 }
 
-// do sends r to the site and returns the response with its body read.
+// do sends r and returns the response with its body read.
 func (s site) do(t *testing.T, r *http.Request) (*http.Response, string) {
 	t.Helper()
 	_, pool := localTLS()
