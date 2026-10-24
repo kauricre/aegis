@@ -30,6 +30,12 @@ func init() {
 // reaches.
 var tweakFetcher func(*samesame.FetcherOptions)
 
+// tweakVerifier, when set, changes the options of the verifier. Only tests set
+// it, to check published test vectors at the times the vectors give, with keys
+// from their key directory, whose host does not exist, through Now and
+// Resolver, which config never reaches.
+var tweakVerifier func(*samesame.VerifierOptions)
+
 // fetchers and nonceStores hold the key caches and nonce stores that the loaded
 // handlers share, as Handler describes. Each is dropped once no loaded handler
 // uses it.
@@ -143,6 +149,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	verifierOpts.Resolver = fetcher.(*samesame.Fetcher)
 	verifierOpts.NonceStore = sharedNonceStore{nonceStore.(*samesame.MemoryNonceStore)}
 	verifierOpts.Scheme = clientScheme
+	if tweakVerifier != nil {
+		tweakVerifier(&verifierOpts)
+	}
 	v, err := samesame.NewVerifier(verifierOpts)
 	if err != nil {
 		return err
