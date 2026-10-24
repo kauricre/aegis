@@ -211,6 +211,19 @@ A stale key directory is downloaded again when a signed request names it.
 While those downloads fail, samesame keeps using the stale directory, so
 `max_ttl` does not limit how long a key keeps verifying.
 
+All `web_bot_auth` directives with the same key discovery settings, in any
+site, share one cache of downloaded key directories. Those settings are
+`allowed_hosts`, `fetch_timeout`, `max_directory_size`, `ttl`, `min_ttl`,
+`max_ttl`, `negative_ttl`, `max_cache_entries` and `max_concurrent_fetches`.
+An agent's key directory is then downloaded once for all of them, and
+`max_cache_entries` and `max_concurrent_fetches` limit them together. A config
+reload keeps the cache when a directive of the new config has the same
+settings, so the reload makes no agent wait for a new download. Settings are
+the same only when written the same: an absent setting differs from one set to
+samesame's default, so a directive without `fetch_timeout` and one with
+`fetch_timeout 5s` use separate caches, and a reload that adds
+`fetch_timeout 5s` starts a new cache.
+
 Discovery is open by default: Aegis downloads the key directory of any agent
 that signs a request. samesame downloads only over HTTPS, follows no
 redirects, and connects only to public addresses; no setting changes that.
@@ -240,18 +253,34 @@ same agent and has the same nonce gets `invalid` with reason `replay`, which
 A correctly signed request without a nonce gets `verified`, also when it is
 sent again: nothing tells a replay of it from the original.
 
-`max_nonces` sets how many nonces `web_bot_auth` remembers at once. When it
-remembers that many, each new nonce makes it forget the soonest-expiring
-nonce of the agent with the most nonces, and a replay of the forgotten one
-gets `verified`. Once an agent that floods the site with signed requests
-holds more nonces than any other agent, each of its new nonces pushes out one
-of its own.
+All `web_bot_auth` directives with the same `max_nonces`, in any site, share
+the nonces they remember, so a replay gets `replay` whichever of them checks
+it. That matters because a signature that covers only the host, not the path,
+verifies on every path of the site: in the `require` example under
+[Modes](#modes), a signed request to a path outside `/feed/`, replayed to
+`/feed/`, gets `replay`, and `require` blocks it. A request that several
+directives check, such as a site-wide `web_bot_auth` and one inside a `handle`
+block, is not a replay of itself: each of them can verify it.
+
+`max_nonces` sets how many nonces the directives with that value remember at
+once, together. When they remember that many, each new nonce makes them
+forget the soonest-expiring nonce of the agent with the most nonces, and a
+replay of the forgotten one gets `verified`. Once an agent that floods the
+site with signed requests holds more nonces than any other agent, each of its
+new nonces pushes out one of its own.
+
+A config reload keeps the nonces of each `max_nonces` value that a directive
+of the new config still has. An absent `max_nonces` counts as a value of its
+own, different from `max_nonces 65536`, samesame's default: directives with
+one and the other remember separate nonces, and a reload from one to the
+other forgets them.
 
 The nonces are kept in memory, which limits the protection:
 
 - A replay sent to another Caddy instance, for example behind a load balancer, gets `verified`.
-- Each `web_bot_auth` directive remembers its own nonces. A signature that covers only the host, not the path, verifies on every path of the site, so a replay sent to a path that another `web_bot_auth` directive checks gets `verified`, once per directive. In the `require` example under [Modes](#modes), a signed request to any path outside `/feed/` can be replayed once to `/feed/`, and `require` lets it through.
-- A config reload forgets every nonce.
+- Directives with different `max_nonces` values remember separate nonces, so a replay sent to a path that a directive with another value checks gets `verified`, once per value.
+- Directives that share nonces but have different `clock_skew` values remember each nonce until `expires` plus the `clock_skew` of the directive that verified it first. Until the larger `clock_skew` also runs out, a replay sent to a directive with that larger value gets `verified`.
+- A config reload forgets the nonces of each `max_nonces` value that no directive of the new config has.
 
 ## Caddy behind another HTTPS server
 
