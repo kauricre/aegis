@@ -4,6 +4,7 @@
 package aegis
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,11 +30,21 @@ func init() {
 // reaches.
 var tweakFetcher func(*samesame.FetcherOptions)
 
+// fetchers and nonceStores hold the key caches and nonce stores that the loaded
+// handlers share, as Handler describes. Each is dropped once no loaded handler
+// uses it.
+var fetchers, nonceStores = caddy.NewUsagePool(), caddy.NewUsagePool()
+
 // Handler checks the Web Bot Auth signature of each request with samesame,
 // writes the outcome and its details to the {web_bot_auth.*} placeholders, and
 // passes the request on unless the mode blocks it. Every setting is optional:
 // an absent mode is observe, an absent identity_header removes and sets no
 // header, and any other absent setting keeps samesame's default.
+//
+// Handlers with the same key discovery settings share one cache of key
+// directories, and handlers with the same max_nonces share the nonces they
+// remember, also across config reloads. An absent setting counts as different
+// from one set to samesame's default.
 type Handler struct {
 	// Which requests are blocked: observe, the default, blocks none; enforce
 	// blocks invalid requests, with the status code samesame suggests; require
@@ -95,6 +106,10 @@ type Handler struct {
 	verifier *samesame.Verifier
 	logger   *zap.Logger
 
+	// The handler's keys in fetchers and nonceStores.
+	fetcherKey    string
+	nonceStoreKey int
+
 	// Whether the handler has logged its warning about insecure_transport.
 	// Each config load makes new handlers, so each load can warn again.
 	warned *atomic.Bool
@@ -114,11 +129,19 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.warned = new(atomic.Bool)
 
 	fetcherOpts, verifierOpts, nonceStoreSize := h.options()
+	// %#v names every option and quotes each allowed host, so two handlers get
+	// the same key only when samesame gets the same options.
+	h.fetcherKey, h.nonceStoreKey = fmt.Sprintf("%#v", fetcherOpts), nonceStoreSize
 	if tweakFetcher != nil {
 		tweakFetcher(&fetcherOpts)
 	}
-	verifierOpts.Resolver = samesame.NewFetcher(fetcherOpts)
-	verifierOpts.NonceStore = samesame.NewMemoryNonceStore(nonceStoreSize)
+	// A new fetcher or nonce store opens no connections and starts no
+	// goroutines, so the one LoadOrStore drops when it finds a stored one
+	// costs nothing to drop.
+	fetcher, _ := fetchers.LoadOrStore(h.fetcherKey, samesame.NewFetcher(fetcherOpts))
+	nonceStore, _ := nonceStores.LoadOrStore(h.nonceStoreKey, samesame.NewMemoryNonceStore(nonceStoreSize))
+	verifierOpts.Resolver = fetcher.(*samesame.Fetcher)
+	verifierOpts.NonceStore = sharedNonceStore{nonceStore.(*samesame.MemoryNonceStore)}
 	verifierOpts.Scheme = clientScheme
 	v, err := samesame.NewVerifier(verifierOpts)
 	if err != nil {
@@ -126,6 +149,52 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	h.verifier = v
 	return nil
+}
+
+// Cleanup releases the handler's key cache and nonce store. Caddy calls it
+// once for each handler whose Provision ran, also when Provision or Validate
+// fails, and Provision takes both before anything can fail.
+func (h *Handler) Cleanup() error {
+	// Delete returns only the errors of a Destruct method, which neither
+	// value has.
+	_, _ = fetchers.Delete(h.fetcherKey)
+	_, _ = nonceStores.Delete(h.nonceStoreKey)
+	return nil
+}
+
+// sharedNonceStore is a nonce store that handlers share. A request that passes
+// several of them is checked by each, and the first check records its nonces,
+// so at the later checks they count as fresh for that request only; any other
+// request with one of them is still a replay.
+type sharedNonceStore struct{ store *samesame.MemoryNonceStore }
+
+// recordedNonce is a nonce that a request recorded in a store. The store is
+// part of it because a request can also pass a handler with another store,
+// which must still record the nonce to catch replays sent to that handler.
+type recordedNonce struct {
+	store        *samesame.MemoryNonceStore
+	scope, nonce string
+}
+
+// recordedNoncesVar names the Caddy var that holds the nonces a request has
+// recorded. Caddy keeps one set of vars per request, seen by all its handlers.
+const recordedNoncesVar = "web_bot_auth.recorded_nonces"
+
+func (s sharedNonceStore) CheckAndRecord(ctx context.Context, scope, nonce string, until time.Time) (bool, error) {
+	key := recordedNonce{s.store, scope, nonce}
+	recorded, _ := caddyhttp.GetVar(ctx, recordedNoncesVar).(map[recordedNonce]bool)
+	if recorded[key] {
+		return true, nil
+	}
+	fresh, err := s.store.CheckAndRecord(ctx, scope, nonce, until)
+	if fresh {
+		if recorded == nil {
+			recorded = make(map[recordedNonce]bool)
+			caddyhttp.SetVar(ctx, recordedNoncesVar, recorded)
+		}
+		recorded[key] = true
+	}
+	return fresh, err
 }
 
 // options returns samesame's options for the settings, and the size of the
@@ -374,6 +443,7 @@ func reasonOf(err error) string {
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*Handler)(nil)
+	_ caddy.CleanerUpper          = (*Handler)(nil)
 	_ caddy.Validator             = (*Handler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Handler)(nil)
 )
