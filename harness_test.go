@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/TecharoHQ/samesame"
@@ -36,11 +37,13 @@ var localTLS = sync.OnceValues(func() (tls.Certificate, *x509.CertPool) {
 })
 
 // testAgent is samesame's signer for an agent, with the URL of the agent's key
-// directory and the agent's private key.
+// directory, the agent's private key, and the number of requests the server of
+// its key directory has received.
 type testAgent struct {
 	*samesame.Signer
 	directory string
 	key       ed25519.PrivateKey
+	requests  *atomic.Int64
 }
 
 // newAgent returns a new agent whose key directory is served from a local
@@ -62,7 +65,11 @@ func newAgent(t *testing.T) testAgent {
 	}
 	mux := http.NewServeMux()
 	mux.Handle(samesame.WellKnownPath, directory)
-	srv.Config.Handler = mux
+	requests := new(atomic.Int64)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		mux.ServeHTTP(w, r)
+	})
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
@@ -70,7 +77,7 @@ func newAgent(t *testing.T) testAgent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return testAgent{signer, "https://" + authority + samesame.WellKnownPath, key.(ed25519.PrivateKey)}
+	return testAgent{signer, "https://" + authority + samesame.WellKnownPath, key.(ed25519.PrivateKey), requests}
 }
 
 // site is Caddy running in-process with one HTTPS site.

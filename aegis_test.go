@@ -7,11 +7,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TecharoHQ/samesame"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
 
 func TestRouteByOutcome(t *testing.T) {
@@ -292,5 +298,222 @@ func TestLogsSignedRequestsAtDebug(t *testing.T) {
 		if sig := signature(r); strings.Contains(logs, sig) {
 			t.Errorf("log contains the signature %s", sig)
 		}
+	}
+}
+
+func TestSettingsReachSamesame(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings, json string
+		fetcher              samesame.FetcherOptions
+		verifier             samesame.VerifierOptions
+	}{
+		// Without settings, every option keeps samesame's default.
+		{"no settings", "", `{}`, samesame.FetcherOptions{}, samesame.VerifierOptions{}},
+		{
+			"allowed_hosts", "allowed_hosts a.example b.example:8443", `{"allowed_hosts":["a.example","b.example:8443"]}`,
+			samesame.FetcherOptions{AllowedHosts: []string{"a.example", "b.example:8443"}}, samesame.VerifierOptions{},
+		},
+		{
+			"allowed_hosts on two lines", "allowed_hosts a.example\nallowed_hosts b.example", `{"allowed_hosts":["a.example","b.example"]}`,
+			samesame.FetcherOptions{AllowedHosts: []string{"a.example", "b.example"}}, samesame.VerifierOptions{},
+		},
+		{
+			"fetch_timeout", "fetch_timeout 3s", `{"fetch_timeout":3000000000}`,
+			samesame.FetcherOptions{Timeout: 3 * time.Second}, samesame.VerifierOptions{},
+		},
+		{
+			"ttl", "ttl 2h", `{"ttl":7200000000000}`,
+			samesame.FetcherOptions{TTL: 2 * time.Hour}, samesame.VerifierOptions{},
+		},
+		{
+			"min_ttl", "min_ttl 5m", `{"min_ttl":300000000000}`,
+			samesame.FetcherOptions{MinTTL: 5 * time.Minute}, samesame.VerifierOptions{},
+		},
+		{
+			"max_ttl", "max_ttl 12h", `{"max_ttl":43200000000000}`,
+			samesame.FetcherOptions{MaxTTL: 12 * time.Hour}, samesame.VerifierOptions{},
+		},
+		{
+			"negative_ttl", "negative_ttl 1m", `{"negative_ttl":60000000000}`,
+			samesame.FetcherOptions{NegativeTTL: time.Minute}, samesame.VerifierOptions{},
+		},
+		{
+			"max_directory_size", "max_directory_size 32KiB", `{"max_directory_size":32768}`,
+			samesame.FetcherOptions{MaxBodySize: 32768}, samesame.VerifierOptions{},
+		},
+		{
+			"max_cache_entries", "max_cache_entries 500", `{"max_cache_entries":500}`,
+			samesame.FetcherOptions{MaxCacheEntries: 500}, samesame.VerifierOptions{},
+		},
+		{
+			"max_concurrent_fetches", "max_concurrent_fetches 8", `{"max_concurrent_fetches":8}`,
+			samesame.FetcherOptions{MaxConcurrentFetches: 8}, samesame.VerifierOptions{},
+		},
+		{
+			"max_validity", "max_validity 1h", `{"max_validity":3600000000000}`,
+			samesame.FetcherOptions{}, samesame.VerifierOptions{MaxValidity: time.Hour},
+		},
+		{
+			"clock_skew", "clock_skew 30s", `{"clock_skew":30000000000}`,
+			samesame.FetcherOptions{}, samesame.VerifierOptions{ClockSkew: 30 * time.Second},
+		},
+		{
+			"max_signatures", "max_signatures 2", `{"max_signatures":2}`,
+			samesame.FetcherOptions{}, samesame.VerifierOptions{MaxSignatures: 2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h Handler
+			if err := h.UnmarshalCaddyfile(caddyfile.NewTestDispenser("web_bot_auth {\n" + tc.settings + "\n}")); err != nil {
+				t.Fatal(err)
+			}
+			b, err := json.Marshal(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tc.json {
+				t.Errorf("JSON = %s, want %s", b, tc.json)
+			}
+
+			// Caddy decodes the JSON of each module this way when it loads a
+			// config.
+			var decoded Handler
+			if err := caddy.StrictUnmarshalJSON(b, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			fetcher, verifier := decoded.options()
+			if !reflect.DeepEqual(fetcher, tc.fetcher) {
+				t.Errorf("fetcher options = %+v, want %+v", fetcher, tc.fetcher)
+			}
+			if !reflect.DeepEqual(verifier, tc.verifier) {
+				t.Errorf("verifier options = %+v, want %+v", verifier, tc.verifier)
+			}
+		})
+	}
+}
+
+func TestConfigCannotReachUnsafeOptions(t *testing.T) {
+	// samesame's options that turn off its protections, named as a setting
+	// for them would be.
+	for _, name := range []string{"allow_private_addresses", "tls_config", "allow_test_keys", "allow_insecure"} {
+		t.Run(name, func(t *testing.T) {
+			var h Handler
+			if err := h.UnmarshalCaddyfile(caddyfile.NewTestDispenser("web_bot_auth {\n" + name + " true\n}")); err == nil {
+				t.Error("the Caddyfile accepts it")
+			}
+			if err := caddy.StrictUnmarshalJSON([]byte(`{"`+name+`":true}`), &h); err == nil {
+				t.Error("JSON accepts it")
+			}
+		})
+	}
+}
+
+func TestValidate(t *testing.T) {
+	type row struct{ json, wantErr string }
+	var rows []row
+	for _, name := range []string{
+		"fetch_timeout", "max_directory_size", "ttl", "min_ttl", "max_ttl", "negative_ttl",
+		"max_cache_entries", "max_concurrent_fetches", "max_validity", "clock_skew", "max_signatures",
+	} {
+		for _, v := range []string{"0", "-1"} {
+			rows = append(rows, row{`{"` + name + `":` + v + `}`, name + " must be positive"})
+		}
+	}
+	rows = append(rows,
+		row{`{}`, ""},
+		row{`{"min_ttl":"1h","max_ttl":"1h"}`, ""},
+		row{`{"min_ttl":"2h","max_ttl":"1h"}`, "min_ttl 2h0m0s is greater than max_ttl 1h0m0s"},
+		// samesame's defaults are a min_ttl of 1m and a max_ttl of 24h.
+		row{`{"min_ttl":"1d"}`, ""},
+		row{`{"min_ttl":"2d"}`, "min_ttl 48h0m0s is greater than samesame's default max_ttl 24h0m0s"},
+		row{`{"max_ttl":"1m"}`, ""},
+		row{`{"max_ttl":"30s"}`, "samesame's default min_ttl 1m0s is greater than max_ttl 30s"},
+	)
+
+	for _, tc := range rows {
+		t.Run(tc.json, func(t *testing.T) {
+			var h Handler
+			if err := caddy.StrictUnmarshalJSON([]byte(tc.json), &h); err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			if err := h.Validate(); err != nil {
+				got = err.Error()
+			}
+			if got != tc.wantErr {
+				t.Errorf("Validate error = %q, want %q", got, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestInvalidSettingFailsConfigLoad(t *testing.T) {
+	adapted, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(`{
+	storage file_system `+t.TempDir()+`
+}
+
+http://127.0.0.1 {
+	web_bot_auth {
+		fetch_timeout 0
+	}
+}
+`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg caddy.Config
+	if err := json.Unmarshal(adapted, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Validate provisions and validates the config as loading it does, but
+	// does not start it.
+	if err := caddy.Validate(&cfg); err == nil || !strings.Contains(err.Error(), "fetch_timeout must be positive") {
+		t.Errorf("Validate error = %v, want one that says fetch_timeout must be positive", err)
+	}
+}
+
+func TestAllowedHosts(t *testing.T) {
+	listed, unlisted := newAgent(t), newAgent(t)
+	u, err := url.Parse(listed.directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := serve(t, `
+	web_bot_auth {
+		allowed_hosts `+u.Host+`
+	}
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	for _, tc := range []struct {
+		name  string
+		agent testAgent
+		want  string
+	}{
+		{"agent on a listed host", listed, "verified "},
+		{"agent on an unlisted host", unlisted, "unverified discovery_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := s.send(t, sign(t, tc.agent, get(t, s.url))); got != tc.want {
+				t.Errorf("response = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if n := unlisted.requests.Load(); n != 0 {
+		t.Errorf("the unlisted agent's key directory server got %d requests, want 0", n)
+	}
+}
+
+func TestMaxValidity(t *testing.T) {
+	agent := newAgent(t)
+	s := serve(t, `
+	web_bot_auth {
+		max_validity 30m
+	}
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	// samesame's signer makes signatures valid for an hour.
+	if got := s.send(t, sign(t, agent, get(t, s.url))); got != "invalid validity_too_long" {
+		t.Errorf("response = %q, want %q", got, "invalid validity_too_long")
 	}
 }
