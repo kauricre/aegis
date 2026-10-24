@@ -147,6 +147,7 @@ web_bot_auth {
 	max_validity           <duration>
 	clock_skew             <duration>
 	max_signatures         <n>
+	max_nonces             <n>
 }
 ```
 
@@ -163,6 +164,7 @@ web_bot_auth {
 | `max_validity` | the longest time from `created` to `expires` accepted in a signature | `24h` |
 | `clock_skew` | the tolerance applied to `created` and `expires` | `1m` |
 | `max_signatures` | the most signatures one request may carry; a request with more gets `invalid` | `4` |
+| `max_nonces` | the most nonces remembered at once to detect replays, across all agents | `65536` |
 
 Durations take Caddy's units, such as `30s`, `1h` or `2d`, and sizes take
 units such as `64KiB` or `1MB`. Zero and negative values fail config load, and
@@ -189,6 +191,32 @@ web_bot_auth {
 	allowed_hosts chatgpt.com
 }
 ```
+
+## Replay protection
+
+A signature stays valid until its `expires` time, so anyone with a copy of a
+signed request can send it again: a replay. `web_bot_auth` remembers the
+nonce of each verified signature, a random value that the agent puts into
+that signature only, for as long as the signature can verify: until
+`expires` plus `clock_skew`. A later request whose signature comes from the
+same agent and has the same nonce gets `invalid` with reason `replay`, which
+`enforce` and `require` block with a `429`. Replay protection is always on.
+
+A correctly signed request without a nonce gets `verified`, also when it is
+sent again: nothing tells a replay of it from the original.
+
+`max_nonces` sets how many nonces `web_bot_auth` remembers at once. When it
+remembers that many, each new nonce makes it forget the soonest-expiring
+nonce of the agent with the most nonces, and a replay of the forgotten one
+gets `verified`. Once an agent that floods the site with signed requests
+holds more nonces than any other agent, each of its new nonces pushes out one
+of its own.
+
+The nonces are kept in memory, which limits the protection:
+
+- A replay sent to another Caddy instance, for example behind a load balancer, gets `verified`.
+- Each `web_bot_auth` directive remembers its own nonces. A signature that covers only the host, not the path, verifies on every path of the site, so a replay sent to a path that another `web_bot_auth` directive checks gets `verified`, once per directive. In the `require` example under [Modes](#modes), a signed request to any path outside `/feed/` can be replayed once to `/feed/`, and `require` lets it through.
+- A config reload forgets every nonce.
 
 ## Access log
 
