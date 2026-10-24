@@ -31,14 +31,20 @@ var tweakFetcher func(*samesame.FetcherOptions)
 // Handler checks the Web Bot Auth signature of each request with samesame,
 // writes the outcome and its details to the {web_bot_auth.*} placeholders, and
 // passes the request on unless the mode blocks it. Every setting is optional:
-// an absent mode is observe, and any other absent setting keeps samesame's
-// default.
+// an absent mode is observe, an absent identity_header removes and sets no
+// header, and any other absent setting keeps samesame's default.
 type Handler struct {
 	// Which requests are blocked: observe, the default, blocks none; enforce
 	// blocks invalid requests, with the status code samesame suggests; require
 	// also blocks unverified requests, with a 403 and an Accept-Signature
 	// header that asks for a signature.
 	Mode string `json:"mode,omitempty"`
+
+	// The request header that tells upstreams which agent sent a verified
+	// request, set to the agent's key directory URL. Any copy a client sends
+	// is removed from every request, whatever the outcome. When unset, no
+	// header is removed or set.
+	IdentityHeader string `json:"identity_header,omitempty"`
 
 	// The only hosts whose agents' key directories are downloaded, each as
 	// host or host:port; when unset, any host. Agents on other hosts get
@@ -193,6 +199,14 @@ func checkPositive[T ~int | ~int64](name string, v *T) error {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// Any client could send the identity header to pass as a verified agent,
+	// so it is removed before anything else, which keeps it off every path
+	// out of this handler, including blocked requests that handle_errors
+	// routes send upstream. A signature that covers it never verifies.
+	if h.IdentityHeader != "" {
+		r.Header.Del(h.IdentityHeader)
+	}
+
 	// samesame checks the method and URL the request arrived with, which
 	// Caddy stores before any handler runs, so a rewrite before this handler
 	// does not break the signature. Caddy stores no headers, so a header
@@ -249,6 +263,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		// it carries no samesame error text, which can quote the client's
 		// Signature-Agent header.
 		return caddyhttp.Error(status, fmt.Errorf("blocked %s request: %s", outcome, reason))
+	}
+	if err == nil && h.IdentityHeader != "" {
+		r.Header.Set(h.IdentityHeader, agent)
 	}
 	return next.ServeHTTP(w, r)
 }

@@ -20,6 +20,7 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 //
 //	web_bot_auth [<matcher>] {
 //		mode                   observe|enforce|require
+//		identity_header        <name>
 //		allowed_hosts          <host...>
 //		fetch_timeout          <duration>
 //		max_directory_size     <size>
@@ -44,6 +45,10 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		switch d.Val() {
 		case "mode":
 			if !d.AllArgs(&h.Mode) {
+				return d.ArgErr()
+			}
+		case "identity_header":
+			if !d.AllArgs(&h.IdentityHeader) {
 				return d.ArgErr()
 			}
 		case "allowed_hosts":
