@@ -149,6 +149,13 @@ func serve(t *testing.T, directives string) site {
 
 func (s site) send(t *testing.T, r *http.Request) string {
 	t.Helper()
+	_, body := s.do(t, r)
+	return body
+}
+
+// do sends r to the site and returns the response with its body read.
+func (s site) do(t *testing.T, r *http.Request) (*http.Response, string) {
+	t.Helper()
 	_, pool := localTLS()
 	client := &http.Client{Transport: &http.Transport{
 		TLSClientConfig:   &tls.Config{RootCAs: pool},
@@ -163,7 +170,7 @@ func (s site) send(t *testing.T, r *http.Request) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(body)
+	return resp, string(body)
 }
 
 // logs returns what the module has logged so far, one JSON object per line.

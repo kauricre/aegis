@@ -1,6 +1,7 @@
 package aegis
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +124,81 @@ func TestReasonOf(t *testing.T) {
 				t.Errorf("reasonOf = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestModes(t *testing.T) {
+	agent, other := newAgent(t), newAgent(t)
+	const challenge = `403 Accept-Signature: sig1=("@authority" "signature-agent";key="sig1");created;expires;tag="web-bot-auth"`
+
+	// What each mode does with each kind of request: pass it on to the next
+	// handler, block it with a status code, or block it with a challenge. The
+	// invalid request has a bad signature, for which samesame suggests 403.
+	for _, tc := range []struct {
+		settings                                string
+		verified, invalid, unverified, unsigned string
+	}{
+		{"", "pass", "pass", "pass", "pass"},
+		{"mode observe", "pass", "pass", "pass", "pass"},
+		{"mode enforce", "pass", "403", "pass", "pass"},
+		{"mode require", "pass", "403", challenge, challenge},
+	} {
+		t.Run(cmp.Or(tc.settings, "no settings"), func(t *testing.T) {
+			s := serve(t, `
+	web_bot_auth {
+		`+tc.settings+`
+	}
+	respond "next handler"`)
+
+			for _, req := range []struct {
+				name string
+				r    *http.Request
+				want string
+			}{
+				{"verified", sign(t, agent, get(t, s.url)), tc.verified},
+				{"invalid", tamper(sign(t, agent, get(t, s.url))), tc.invalid},
+				{"unverified signed", claim(sign(t, agent, get(t, s.url)), other), tc.unverified},
+				{"unsigned", get(t, s.url), tc.unsigned},
+			} {
+				t.Run(req.name, func(t *testing.T) {
+					resp, body := s.do(t, req.r)
+					got := strconv.Itoa(resp.StatusCode)
+					if body == "next handler" {
+						got = "pass"
+					}
+					if v := resp.Header.Get("Accept-Signature"); v != "" {
+						got += " Accept-Signature: " + v
+					}
+					if got != req.want {
+						t.Errorf("response = %q, want %q", got, req.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestBlockedInvalidRequestStatus(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{samesame.ErrMalformedSignature, http.StatusBadRequest},
+		{samesame.ErrMalformedSignatureAgent, http.StatusBadRequest},
+		{samesame.ErrReplay, http.StatusTooManyRequests},
+		{samesame.ErrBadSignature, http.StatusForbidden},
+	} {
+		// samesame returns each error in a VerifyError, most of them wrapped
+		// with details.
+		err := &samesame.VerifyError{Outcome: samesame.OutcomeInvalid, Err: fmt.Errorf("%w: details", tc.err)}
+		for _, mode := range []string{"enforce", "require"} {
+			t.Run(mode+" "+tc.err.Error(), func(t *testing.T) {
+				status, challenge := blockStatus(mode, err)
+				if status != tc.want || challenge {
+					t.Errorf("blockStatus = %d, challenge %t; want %d without a challenge", status, challenge, tc.want)
+				}
+			})
+		}
 	}
 }
 
@@ -421,6 +498,10 @@ func TestValidate(t *testing.T) {
 	}
 	rows = append(rows,
 		row{`{}`, ""},
+		row{`{"mode":"observe"}`, ""},
+		row{`{"mode":"enforce"}`, ""},
+		row{`{"mode":"require"}`, ""},
+		row{`{"mode":"block"}`, `mode must be observe, enforce or require, not "block"`},
 		row{`{"min_ttl":"1h","max_ttl":"1h"}`, ""},
 		row{`{"min_ttl":"2h","max_ttl":"1h"}`, "min_ttl 2h0m0s is greater than max_ttl 1h0m0s"},
 		// samesame's defaults are a min_ttl of 1m and a max_ttl of 24h.
@@ -448,28 +529,35 @@ func TestValidate(t *testing.T) {
 }
 
 func TestInvalidSettingFailsConfigLoad(t *testing.T) {
-	adapted, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(`{
+	for _, tc := range []struct{ setting, wantErr string }{
+		{"fetch_timeout 0", "fetch_timeout must be positive"},
+		{"mode block", `mode must be observe, enforce or require, not "block"`},
+	} {
+		t.Run(tc.setting, func(t *testing.T) {
+			adapted, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(`{
 	storage file_system `+t.TempDir()+`
 }
 
 http://127.0.0.1 {
 	web_bot_auth {
-		fetch_timeout 0
+		`+tc.setting+`
 	}
 }
 `), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg caddy.Config
-	if err := json.Unmarshal(adapted, &cfg); err != nil {
-		t.Fatal(err)
-	}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg caddy.Config
+			if err := json.Unmarshal(adapted, &cfg); err != nil {
+				t.Fatal(err)
+			}
 
-	// Validate provisions and validates the config as loading it does, but
-	// does not start it.
-	if err := caddy.Validate(&cfg); err == nil || !strings.Contains(err.Error(), "fetch_timeout must be positive") {
-		t.Errorf("Validate error = %v, want one that says fetch_timeout must be positive", err)
+			// Validate provisions and validates the config as loading it
+			// does, but does not start it.
+			if err := caddy.Validate(&cfg); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate error = %v, want one that says %s", err, tc.wantErr)
+			}
+		})
 	}
 }
 
