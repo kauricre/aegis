@@ -33,9 +33,16 @@ var localTLS = sync.OnceValues(func() (tls.Certificate, *x509.CertPool) {
 	return srv.TLS.Certificates[0], pool
 })
 
-// newAgent returns samesame's signer for a new agent whose key directory is
-// served from a local HTTPS server until the test ends.
-func newAgent(t *testing.T) *samesame.Signer {
+// testAgent is samesame's signer for an agent, with the URL of the agent's key
+// directory.
+type testAgent struct {
+	*samesame.Signer
+	directory string
+}
+
+// newAgent returns a new agent whose key directory is served from a local
+// HTTPS server until the test ends.
+func newAgent(t *testing.T) testAgent {
 	t.Helper()
 	key, err := samesame.GenerateKey(samesame.AlgEd25519)
 	if err != nil {
@@ -60,7 +67,7 @@ func newAgent(t *testing.T) *samesame.Signer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return signer
+	return testAgent{signer, "https://" + authority + samesame.WellKnownPath}
 }
 
 // site is Caddy running in-process with one HTTPS site.
@@ -177,7 +184,7 @@ func post(t *testing.T, url, body string) *http.Request {
 	return r
 }
 
-func sign(t *testing.T, agent *samesame.Signer, r *http.Request) *http.Request {
+func sign(t *testing.T, agent testAgent, r *http.Request) *http.Request {
 	t.Helper()
 	if err := agent.Sign(r); err != nil {
 		t.Fatal(err)
@@ -193,6 +200,14 @@ func tamper(r *http.Request) *http.Request {
 		c = "B"
 	}
 	r.Header.Set("Signature", samesame.DefaultLabel+"=:"+c+sig[1:]+":")
+	return r
+}
+
+// claim sets r's Signature-Agent header to agent's origin, whose key directory
+// does not hold the key r is signed with, and returns r.
+func claim(r *http.Request, agent testAgent) *http.Request {
+	origin := strings.TrimSuffix(agent.directory, samesame.WellKnownPath)
+	r.Header.Set("Signature-Agent", fmt.Sprintf("%s=%q", samesame.DefaultLabel, origin))
 	return r
 }
 
