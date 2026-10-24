@@ -22,6 +22,7 @@ version.
 - Replay protection, always on: a request whose signature repeats the nonce of a verified signature from the same agent gets `invalid` with reason `replay`; the `max_nonces` setting sets how many nonces are remembered.
 - `identity_header` setting: names a request header that `web_bot_auth` removes from every request it handles and, on a verified request, sets to the agent's key directory URL, so the app behind Caddy knows which agent sent the request and no client can fake it.
 - Signatures verify behind a front server that ends TLS and sends plain HTTP, when Caddy's `trusted_proxies` holds it: `web_bot_auth` then takes the scheme from `X-Forwarded-Proto`, and the first `insecure_transport` outcome after each config load logs a warning that names the fix.
+- `web_bot_auth` directives with the same key discovery settings share their downloaded key directories, and those with the same `max_nonces` share their nonces, also across config reloads, where an absent setting counts as different from one set to samesame's default: a reload that keeps those settings makes no agent wait for a download, and a replay gets `replay` at each directive that shares the nonces.
 
 ### Changed
 
