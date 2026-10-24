@@ -125,9 +125,43 @@ example.com {
 Blocked requests go through Caddy's error handling, so `handle_errors` can
 change the response, and the `{web_bot_auth.*}` placeholders are set there.
 
+## Identity header
+
+`identity_header` names a request header that tells the app behind Caddy
+which agent sent each verified request:
+
+```caddyfile
+web_bot_auth {
+	identity_header Web-Bot-Auth-Agent
+}
+```
+
+On a `verified` request, the header holds the full URL of the agent's key
+directory, the value of `{web_bot_auth.agent}`.
+
+`web_bot_auth` first removes any copy of the header that the client sent,
+from every request it handles, whatever the outcome. Without that, any client
+could send the header itself and pass as a verified agent. Blocked requests
+lose it too, because `handle_errors` routes can still send them to the app.
+
+Only requests that a `web_bot_auth` with `identity_header` handles lose the
+client's copy. A request that its matcher skips, or that takes a route without
+it, reaches the app with the copy, so put such a `web_bot_auth`, with no
+matcher, in every route that reaches the app. In the `require` example under
+[Modes](#modes), each of the two `web_bot_auth` directives covers only its own
+route.
+
+The header is removed before the signature is checked, so a signature that
+covers it never verifies. Pick a name that agents do not send, never
+`Signature`, `Signature-Input` or `Signature-Agent`.
+
+Without `identity_header`, `web_bot_auth` neither removes nor sets any request
+header.
+
 ## Settings
 
-Every setting is optional. `mode` is described in [Modes](#modes). The others
+Every setting is optional. `mode` is described in [Modes](#modes) and
+`identity_header` in [Identity header](#identity-header). The others
 go to [samesame](https://github.com/TecharoHQ/samesame), the library that
 checks the signatures: an absent one keeps samesame's default, and Aegis sets
 no defaults of its own.
@@ -135,6 +169,7 @@ no defaults of its own.
 ```caddyfile
 web_bot_auth {
 	mode                   observe|enforce|require
+	identity_header        <name>
 	allowed_hosts          <host...>
 	fetch_timeout          <duration>
 	max_directory_size     <size>
