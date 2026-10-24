@@ -209,6 +209,21 @@ func sign(t *testing.T, agent testAgent, r *http.Request) *http.Request {
 	return r
 }
 
+// signWithoutNonce signs r as agent, as sign does, but leaves the nonce out of
+// the signature.
+func signWithoutNonce(t *testing.T, agent testAgent, r *http.Request) *http.Request {
+	t.Helper()
+	origin := strings.TrimSuffix(agent.directory, samesame.WellKnownPath)
+	signer, err := samesame.NewSigner(agent.key, samesame.SignerOptions{AgentOrigin: origin, DisableNonce: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := signer.Sign(r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 // signMethodAndURL signs r as agent with httpsign, samesame's signature engine.
 // Unlike sign, the signature also covers r's method and full URL (@method and
 // @target-uri), which samesame's signer never covers, and has no nonce.

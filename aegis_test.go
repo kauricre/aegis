@@ -383,60 +383,65 @@ func TestSettingsReachSamesame(t *testing.T) {
 		name, settings, json string
 		fetcher              samesame.FetcherOptions
 		verifier             samesame.VerifierOptions
+		nonceStoreSize       int
 	}{
 		// Without settings, every option keeps samesame's default.
-		{"no settings", "", `{}`, samesame.FetcherOptions{}, samesame.VerifierOptions{}},
+		{"no settings", "", `{}`, samesame.FetcherOptions{}, samesame.VerifierOptions{}, 0},
 		{
 			"allowed_hosts", "allowed_hosts a.example b.example:8443", `{"allowed_hosts":["a.example","b.example:8443"]}`,
-			samesame.FetcherOptions{AllowedHosts: []string{"a.example", "b.example:8443"}}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{AllowedHosts: []string{"a.example", "b.example:8443"}}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"allowed_hosts on two lines", "allowed_hosts a.example\nallowed_hosts b.example", `{"allowed_hosts":["a.example","b.example"]}`,
-			samesame.FetcherOptions{AllowedHosts: []string{"a.example", "b.example"}}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{AllowedHosts: []string{"a.example", "b.example"}}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"fetch_timeout", "fetch_timeout 3s", `{"fetch_timeout":3000000000}`,
-			samesame.FetcherOptions{Timeout: 3 * time.Second}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{Timeout: 3 * time.Second}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"ttl", "ttl 2h", `{"ttl":7200000000000}`,
-			samesame.FetcherOptions{TTL: 2 * time.Hour}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{TTL: 2 * time.Hour}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"min_ttl", "min_ttl 5m", `{"min_ttl":300000000000}`,
-			samesame.FetcherOptions{MinTTL: 5 * time.Minute}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{MinTTL: 5 * time.Minute}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"max_ttl", "max_ttl 12h", `{"max_ttl":43200000000000}`,
-			samesame.FetcherOptions{MaxTTL: 12 * time.Hour}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{MaxTTL: 12 * time.Hour}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"negative_ttl", "negative_ttl 1m", `{"negative_ttl":60000000000}`,
-			samesame.FetcherOptions{NegativeTTL: time.Minute}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{NegativeTTL: time.Minute}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"max_directory_size", "max_directory_size 32KiB", `{"max_directory_size":32768}`,
-			samesame.FetcherOptions{MaxBodySize: 32768}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{MaxBodySize: 32768}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"max_cache_entries", "max_cache_entries 500", `{"max_cache_entries":500}`,
-			samesame.FetcherOptions{MaxCacheEntries: 500}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{MaxCacheEntries: 500}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"max_concurrent_fetches", "max_concurrent_fetches 8", `{"max_concurrent_fetches":8}`,
-			samesame.FetcherOptions{MaxConcurrentFetches: 8}, samesame.VerifierOptions{},
+			samesame.FetcherOptions{MaxConcurrentFetches: 8}, samesame.VerifierOptions{}, 0,
 		},
 		{
 			"max_validity", "max_validity 1h", `{"max_validity":3600000000000}`,
-			samesame.FetcherOptions{}, samesame.VerifierOptions{MaxValidity: time.Hour},
+			samesame.FetcherOptions{}, samesame.VerifierOptions{MaxValidity: time.Hour}, 0,
 		},
 		{
 			"clock_skew", "clock_skew 30s", `{"clock_skew":30000000000}`,
-			samesame.FetcherOptions{}, samesame.VerifierOptions{ClockSkew: 30 * time.Second},
+			samesame.FetcherOptions{}, samesame.VerifierOptions{ClockSkew: 30 * time.Second}, 0,
 		},
 		{
 			"max_signatures", "max_signatures 2", `{"max_signatures":2}`,
-			samesame.FetcherOptions{}, samesame.VerifierOptions{MaxSignatures: 2},
+			samesame.FetcherOptions{}, samesame.VerifierOptions{MaxSignatures: 2}, 0,
+		},
+		{
+			"max_nonces", "max_nonces 1000", `{"max_nonces":1000}`,
+			samesame.FetcherOptions{}, samesame.VerifierOptions{}, 1000,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -458,12 +463,15 @@ func TestSettingsReachSamesame(t *testing.T) {
 			if err := caddy.StrictUnmarshalJSON(b, &decoded); err != nil {
 				t.Fatal(err)
 			}
-			fetcher, verifier, _ := decoded.options()
+			fetcher, verifier, nonceStoreSize := decoded.options()
 			if !reflect.DeepEqual(fetcher, tc.fetcher) {
 				t.Errorf("fetcher options = %+v, want %+v", fetcher, tc.fetcher)
 			}
 			if !reflect.DeepEqual(verifier, tc.verifier) {
 				t.Errorf("verifier options = %+v, want %+v", verifier, tc.verifier)
+			}
+			if nonceStoreSize != tc.nonceStoreSize {
+				t.Errorf("nonce store size = %d, want %d", nonceStoreSize, tc.nonceStoreSize)
 			}
 		})
 	}
@@ -490,7 +498,7 @@ func TestValidate(t *testing.T) {
 	var rows []row
 	for _, name := range []string{
 		"fetch_timeout", "max_directory_size", "ttl", "min_ttl", "max_ttl", "negative_ttl",
-		"max_cache_entries", "max_concurrent_fetches", "max_validity", "clock_skew", "max_signatures",
+		"max_cache_entries", "max_concurrent_fetches", "max_validity", "clock_skew", "max_signatures", "max_nonces",
 	} {
 		for _, v := range []string{"0", "-1"} {
 			rows = append(rows, row{`{"` + name + `":` + v + `}`, name + " must be positive"})
@@ -603,5 +611,58 @@ func TestMaxValidity(t *testing.T) {
 	// samesame's signer makes signatures valid for an hour.
 	if got := s.send(t, sign(t, agent, get(t, s.url))); got != "invalid validity_too_long" {
 		t.Errorf("response = %q, want %q", got, "invalid validity_too_long")
+	}
+}
+
+func TestReplay(t *testing.T) {
+	agent := newAgent(t)
+	s := serve(t, `
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	for _, tc := range []struct {
+		name          string
+		req           *http.Request
+		first, second string
+	}{
+		// samesame's signer puts a random nonce into every signature.
+		{"signature with a nonce", sign(t, agent, get(t, s.url)), "verified ", "invalid replay"},
+		{"signature without a nonce", signWithoutNonce(t, agent, get(t, s.url)), "verified ", "verified "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := s.send(t, tc.req); got != tc.first {
+				t.Errorf("response = %q, want %q", got, tc.first)
+			}
+			if got := s.send(t, tc.req); got != tc.second {
+				t.Errorf("response to the same request sent again = %q, want %q", got, tc.second)
+			}
+		})
+	}
+}
+
+func TestMaxNonces(t *testing.T) {
+	agent := newAgent(t)
+	s := serve(t, `
+	web_bot_auth {
+		max_nonces 1
+	}
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+
+	first, second := sign(t, agent, get(t, s.url)), sign(t, agent, get(t, s.url))
+	for _, step := range []struct {
+		name string
+		req  *http.Request
+		want string
+	}{
+		{"first request", first, "verified "},
+		{"second request", second, "verified "},
+		{"second request sent again", second, "invalid replay"},
+		// The store holds one nonce, so remembering the second request's
+		// nonce made it forget the first's.
+		{"first request sent again", first, "verified "},
+	} {
+		if got := s.send(t, step.req); got != step.want {
+			t.Errorf("%s: response = %q, want %q", step.name, got, step.want)
+		}
 	}
 }
