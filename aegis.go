@@ -5,7 +5,9 @@ package aegis
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/TecharoHQ/samesame"
 	"github.com/caddyserver/caddy/v2"
@@ -22,13 +24,56 @@ func init() {
 
 // tweakFetcher, when set, changes the options of the fetcher that downloads
 // key directories. Only tests set it, to reach key directories on a loopback
-// test server; config never reaches these options.
+// test server through AllowPrivateAddresses and TLSConfig, which config never
+// reaches.
 var tweakFetcher func(*samesame.FetcherOptions)
 
 // Handler checks the Web Bot Auth signature of each request with samesame,
 // writes the outcome and its details to the {web_bot_auth.*} placeholders, and
-// passes the request on.
+// passes the request on. Every setting is optional: an absent one keeps
+// samesame's default.
 type Handler struct {
+	// The only hosts whose agents' key directories are downloaded, each as
+	// host or host:port; when unset, any host. Agents on other hosts get
+	// unverified.
+	AllowedHosts []string `json:"allowed_hosts,omitempty"`
+
+	// How long one key directory download may take.
+	FetchTimeout *caddy.Duration `json:"fetch_timeout,omitempty"`
+
+	// The largest key directory accepted, in bytes after decompression.
+	MaxDirectorySize *int64 `json:"max_directory_size,omitempty"`
+
+	// How long a downloaded key directory stays fresh when its response sets
+	// no cache lifetime.
+	TTL *caddy.Duration `json:"ttl,omitempty"`
+
+	// The shortest and the longest time a downloaded key directory stays
+	// fresh, whatever its response or ttl says.
+	MinTTL *caddy.Duration `json:"min_ttl,omitempty"`
+	MaxTTL *caddy.Duration `json:"max_ttl,omitempty"`
+
+	// The base of the wait after a failed key directory download before the
+	// next one. It doubles with each consecutive failure.
+	NegativeTTL *caddy.Duration `json:"negative_ttl,omitempty"`
+
+	// The most key directories cached at once, counting those whose download
+	// failed.
+	MaxCacheEntries *int `json:"max_cache_entries,omitempty"`
+
+	// The most key directory downloads in flight at once, across all agents.
+	MaxConcurrentFetches *int `json:"max_concurrent_fetches,omitempty"`
+
+	// The longest time from created to expires accepted in a signature.
+	MaxValidity *caddy.Duration `json:"max_validity,omitempty"`
+
+	// The tolerance applied to the created and expires times of a signature.
+	ClockSkew *caddy.Duration `json:"clock_skew,omitempty"`
+
+	// The most Web Bot Auth signatures one request may carry. A request with
+	// more gets invalid.
+	MaxSignatures *int `json:"max_signatures,omitempty"`
+
 	verifier *samesame.Verifier
 	logger   *zap.Logger
 }
@@ -41,19 +86,89 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Provision builds the verifier: open discovery with samesame's defaults.
+// Provision builds the verifier from the settings.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
 
-	var opts samesame.FetcherOptions
+	fetcherOpts, verifierOpts := h.options()
 	if tweakFetcher != nil {
-		tweakFetcher(&opts)
+		tweakFetcher(&fetcherOpts)
 	}
-	v, err := samesame.NewVerifier(samesame.VerifierOptions{Resolver: samesame.NewFetcher(opts)})
+	verifierOpts.Resolver = samesame.NewFetcher(fetcherOpts)
+	v, err := samesame.NewVerifier(verifierOpts)
 	if err != nil {
 		return err
 	}
 	h.verifier = v
+	return nil
+}
+
+// options returns samesame's options for the settings. An absent setting
+// stays zero, which samesame replaces with its own default.
+func (h *Handler) options() (samesame.FetcherOptions, samesame.VerifierOptions) {
+	return samesame.FetcherOptions{
+		AllowedHosts:         h.AllowedHosts,
+		Timeout:              time.Duration(deref(h.FetchTimeout)),
+		MaxBodySize:          deref(h.MaxDirectorySize),
+		TTL:                  time.Duration(deref(h.TTL)),
+		MinTTL:               time.Duration(deref(h.MinTTL)),
+		MaxTTL:               time.Duration(deref(h.MaxTTL)),
+		NegativeTTL:          time.Duration(deref(h.NegativeTTL)),
+		MaxCacheEntries:      deref(h.MaxCacheEntries),
+		MaxConcurrentFetches: deref(h.MaxConcurrentFetches),
+	}, samesame.VerifierOptions{
+		MaxValidity:   time.Duration(deref(h.MaxValidity)),
+		ClockSkew:     time.Duration(deref(h.ClockSkew)),
+		MaxSignatures: deref(h.MaxSignatures),
+	}
+}
+
+func deref[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
+}
+
+// Validate rejects a zero or negative number, which samesame would replace
+// with its default, and a min_ttl greater than max_ttl, under which every key
+// directory would stay fresh for max_ttl.
+func (h *Handler) Validate() error {
+	if err := errors.Join(
+		checkPositive("fetch_timeout", h.FetchTimeout),
+		checkPositive("max_directory_size", h.MaxDirectorySize),
+		checkPositive("ttl", h.TTL),
+		checkPositive("min_ttl", h.MinTTL),
+		checkPositive("max_ttl", h.MaxTTL),
+		checkPositive("negative_ttl", h.NegativeTTL),
+		checkPositive("max_cache_entries", h.MaxCacheEntries),
+		checkPositive("max_concurrent_fetches", h.MaxConcurrentFetches),
+		checkPositive("max_validity", h.MaxValidity),
+		checkPositive("clock_skew", h.ClockSkew),
+		checkPositive("max_signatures", h.MaxSignatures),
+	); err != nil {
+		return err
+	}
+
+	minTTL, minName := samesame.DefaultMinTTL, "samesame's default min_ttl"
+	if h.MinTTL != nil {
+		minTTL, minName = time.Duration(*h.MinTTL), "min_ttl"
+	}
+	maxTTL, maxName := samesame.DefaultMaxTTL, "samesame's default max_ttl"
+	if h.MaxTTL != nil {
+		maxTTL, maxName = time.Duration(*h.MaxTTL), "max_ttl"
+	}
+	if minTTL > maxTTL {
+		return fmt.Errorf("%s %s is greater than %s %s", minName, minTTL, maxName, maxTTL)
+	}
+	return nil
+}
+
+func checkPositive[T ~int | ~int64](name string, v *T) error {
+	if v != nil && *v <= 0 {
+		return fmt.Errorf("%s must be positive", name)
+	}
 	return nil
 }
 
@@ -151,5 +266,6 @@ func reasonOf(err error) string {
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*Handler)(nil)
+	_ caddy.Validator             = (*Handler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Handler)(nil)
 )
