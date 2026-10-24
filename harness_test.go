@@ -84,6 +84,8 @@ func newAgent(t *testing.T) testAgent {
 type site struct {
 	url string
 	log string // file that receives the module's logs
+
+	caddyfile func(directives string) string // the Caddyfile with the site's directives
 }
 
 // serve runs Caddy with one HTTPS site that holds directives, as serveSite
@@ -123,7 +125,8 @@ func serveSite(t *testing.T, scheme, global, directives string) site {
 	if scheme == "https" {
 		certs = "tls " + certFile + " " + keyFile
 	}
-	caddyfile := fmt.Sprintf(`{
+	s.caddyfile = func(directives string) string {
+		return fmt.Sprintf(`{
 	admin off
 	persist_config off
 	storage file_system %s
@@ -144,20 +147,28 @@ func serveSite(t *testing.T, scheme, global, directives string) site {
 	%s
 }
 `, dir, global, s.log, s.url, certs, directives)
+	}
 
-	cfg, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(caddyfile), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := caddy.Load(cfg, true); err != nil {
-		t.Fatal(err)
-	}
+	s.load(t, directives)
 	t.Cleanup(func() {
 		if err := caddy.Stop(); err != nil {
 			t.Error(err)
 		}
 	})
 	return s
+}
+
+// load runs the site with directives in place of its current ones. Like a
+// config reload, it replaces the running config without stopping Caddy.
+func (s site) load(t *testing.T, directives string) {
+	t.Helper()
+	cfg, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(s.caddyfile(directives)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := caddy.Load(cfg, true); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (s site) send(t *testing.T, r *http.Request) string {

@@ -879,3 +879,106 @@ func TestXForwardedHostIsIgnored(t *testing.T) {
 		t.Errorf("response = %q, want %q", got, "invalid bad_signature")
 	}
 }
+
+func TestKeyDirectoriesAndNoncesAcrossReloads(t *testing.T) {
+	agent := newAgent(t)
+	const respond = `
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`
+	s := serve(t, `
+	web_bot_auth`+respond)
+
+	// samesame's signer puts a random nonce into every signature.
+	r := sign(t, agent, get(t, s.url))
+	if got := s.send(t, r); got != "verified " {
+		t.Errorf("response = %q, want %q", got, "verified ")
+	}
+
+	// Each step reloads the config and sends r again. A kept nonce store still
+	// remembers r's nonce, and a kept key cache needs no new download of the
+	// agent's key directory.
+	for _, step := range []struct {
+		name, directives string
+		want             string
+		downloads        int64 // since the test started
+	}{
+		{"another directive changed", `
+	web_bot_auth
+	respond "reloaded: {web_bot_auth.outcome} {web_bot_auth.reason}"`, "reloaded: invalid replay", 1},
+		{"a key discovery setting changed", `
+	web_bot_auth {
+		fetch_timeout 3s
+	}` + respond, "invalid replay", 2},
+		{"max_nonces changed", `
+	web_bot_auth {
+		fetch_timeout 3s
+		max_nonces 1000
+	}` + respond, "verified ", 2},
+		// No loaded config uses the first settings any more, so their key
+		// cache and nonce store are gone.
+		{"the first settings again", `
+	web_bot_auth` + respond, "verified ", 3},
+	} {
+		s.load(t, step.directives)
+		if got := s.send(t, r); got != step.want {
+			t.Errorf("%s: response = %q, want %q", step.name, got, step.want)
+		}
+		if n := agent.requests.Load(); n != step.downloads {
+			t.Errorf("%s: key directory downloads = %d, want %d", step.name, n, step.downloads)
+		}
+	}
+}
+
+func TestDirectivesShareNonces(t *testing.T) {
+	agent := newAgent(t)
+	for _, tc := range []struct {
+		name, settings string // of the directive for /feed/
+		replayedToFeed string // the response to a request to / replayed to /feed/
+	}{
+		{"same max_nonces", "", "429"},
+		// Directives with different max_nonces remember separate nonces.
+		{"different max_nonces", "max_nonces 1000", "feed: verified "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Requests to /feed/ pass both directives.
+			s := serve(t, `
+	web_bot_auth
+	handle /feed/* {
+		web_bot_auth {
+			mode require
+			`+tc.settings+`
+		}
+		respond "feed: {web_bot_auth.outcome} {web_bot_auth.reason}"
+	}
+	handle {
+		respond "{web_bot_auth.outcome} {web_bot_auth.reason}"
+	}`)
+
+			feed := sign(t, agent, get(t, s.url+"/feed/x"))
+			home := sign(t, agent, get(t, s.url))
+			// samesame's signer covers only the host and Signature-Agent, so
+			// the signature of home also verifies on /feed/.
+			homeToFeed := get(t, s.url+"/feed/x")
+			homeToFeed.Header = home.Header.Clone()
+
+			for _, step := range []struct {
+				name string
+				req  *http.Request
+				want string
+			}{
+				{"request checked by both directives", feed, "feed: verified "},
+				{"the same request sent again", feed, "429"},
+				{"request to another path", home, "verified "},
+				{"that request replayed to /feed/", homeToFeed, tc.replayedToFeed},
+			} {
+				resp, body := s.do(t, step.req)
+				got := body
+				if resp.StatusCode != http.StatusOK {
+					got = strconv.Itoa(resp.StatusCode)
+				}
+				if got != step.want {
+					t.Errorf("%s: response = %q, want %q", step.name, got, step.want)
+				}
+			}
+		})
+	}
+}
