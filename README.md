@@ -253,6 +253,96 @@ The nonces are kept in memory, which limits the protection:
 - Each `web_bot_auth` directive remembers its own nonces. A signature that covers only the host, not the path, verifies on every path of the site, so a replay sent to a path that another `web_bot_auth` directive checks gets `verified`, once per directive. In the `require` example under [Modes](#modes), a signed request to any path outside `/feed/` can be replayed once to `/feed/`, and `require` lets it through.
 - A config reload forgets every nonce.
 
+## Caddy behind another HTTPS server
+
+Signatures must be sent over HTTPS. A signed request gets `invalid` with reason
+`insecure_transport` unless `web_bot_auth` can tell that the client used HTTPS.
+When a front server, such as a load balancer, a CDN or a tunnel, ends the
+client's TLS in front of Caddy, Caddy sees only the front server's connection,
+and the way that connection reaches Caddy decides whether signatures verify.
+
+### Preferred: re-encryption or TLS passthrough
+
+With re-encryption, the front server opens its own HTTPS connection to Caddy.
+With TLS passthrough, it routes the client's TLS connection to Caddy by SNI
+without decrypting it. Either way, Caddy ends TLS itself and every hop is
+encrypted, so signatures verify with no setting and no trusted header.
+
+A re-encrypting front server must:
+
+- keep the client's `Host` header, which signatures cover;
+- send SNI, or Caddy needs the `default_sni` global option to pick a certificate;
+- redirect clients that use plain HTTP to HTTPS, instead of forwarding their requests to Caddy over HTTPS, which would make a signature sent in plaintext verify.
+
+With TLS passthrough, Caddy needs certificates for the site's names, so the
+front server must also pass Caddy's ACME challenges through, unless Caddy uses
+the DNS challenge. To keep client IPs, have the front server send the PROXY
+protocol, and put Caddy's `proxy_protocol` listener wrapper, with `allow` for
+the front server, before `tls`.
+
+### Otherwise: plain HTTP from a trusted front server
+
+When the front server sends plain HTTP, `web_bot_auth` takes the scheme from
+its `X-Forwarded-Proto` header, but only when Caddy's `trusted_proxies` server
+option holds the front server. If the header appears more than once,
+the last one decides: `https` or `wss` means HTTPS, anything else plain HTTP.
+From any other peer, the header is ignored. `web_bot_auth` has no setting for
+this.
+
+```caddyfile
+{
+	servers {
+		trusted_proxies static 10.0.0.5
+	}
+}
+
+http://example.com {
+	web_bot_auth
+	reverse_proxy app:8080
+}
+```
+
+The site address starts with `http://`, or Caddy redirects the front server's
+plain-HTTP requests to HTTPS. For a front server that reaches Caddy over a Unix
+socket, use `trusted_proxies_unix` instead.
+
+Use this only when nobody can watch the hop from the front server to Caddy,
+best with both on the same machine. Signatures cross that hop in plaintext, and
+anyone who reads them there can replay them, within the limits of
+[replay protection](#replay-protection).
+
+`trusted_proxies` is not specific to `web_bot_auth`: `reverse_proxy` and the
+client IP also trust headers from the peers it holds. In turn, each of those
+peers can make a signature sent over plain HTTP count as HTTPS, so each must set
+`X-Forwarded-Proto` itself, replacing any value from the client.
+
+### Front server config
+
+| Front server | Re-encryption or TLS passthrough | Plain HTTP to Caddy |
+|---|---|---|
+| nginx | `proxy_pass https://<caddy>;` with `proxy_set_header Host $host;`, `proxy_ssl_server_name on;` and `proxy_ssl_name $host;`. Passthrough: the `stream` module with `ssl_preread on;` | `proxy_pass http://<caddy>;` with no path after the address, `proxy_set_header Host $host;` and `proxy_set_header X-Forwarded-Proto $scheme;` |
+| HAProxy | `ssl` on the `server` line; HAProxy 3.4 sends the request's host as SNI by default. Passthrough: `mode tcp`, routing on `req.ssl_sni` | `http-request set-header X-Forwarded-Proto %[ssl_fc,iif(https,http)]`, not `add-header X-Forwarded-Proto https if { ssl_fc }`, which keeps a client's own value on plain-HTTP listeners |
+| Traefik | Passthrough: a TCP router with `tls.passthrough: true` | Nothing: by default, Traefik sets `X-Forwarded-Proto` and removes the client's value |
+| Cloudflare | SSL/TLS encryption mode "Full (strict)" | Not "Flexible": see below |
+| Cloudflare Tunnel | An `https://` service with `matchSNItoHost: true` under `originRequest` | An `http://127.0.0.1:<port>` service, with `trusted_proxies static 127.0.0.1/32`. Do not set `httpHostHeader` |
+| Tailscale Funnel | `tailscale funnel --tcp=443 tcp://localhost:<port>` | `tailscale funnel <port>`, which sets `X-Forwarded-Proto: https`, with `trusted_proxies static 127.0.0.1/32`. Avoid Unix socket targets, which get `Host: localhost`, and `--set-path`, which changes the path |
+
+Some front server setups break signatures or expose them:
+
+- Cloudflare "Flexible" sends requests from Cloudflare to Caddy over plain HTTP, so signatures cross the internet in plaintext. Use "Full (strict)".
+- nginx replaces `Host` with the address in `proxy_pass` unless `proxy_set_header Host $host;` is set, and signatures then get `invalid`.
+- Traefik removes `.` and `..` segments and duplicate slashes from paths, decodes percent-encoded unreserved characters, uppercases other percent-encodings, and turns `;` into `&` in queries. A signature that covers the path or query of a request Traefik changes gets `invalid`; samesame's own signer covers only the host and `Signature-Agent`. Traefik's docs call turning `sanitizePath` off unsafe.
+- Fix `Host` at the front server: `web_bot_auth` never reads `X-Forwarded-Host`, because trusting it would let a signature made for one site verify on another.
+
+After each config load, the first signature that gets `insecure_transport`
+makes `web_bot_auth` log a warning that names the fix: if the request carried
+`X-Forwarded-Proto` from a peer that Caddy does not trust as a proxy, add the
+front server to `trusted_proxies`, or set `trusted_proxies_unix` for a Unix
+socket; otherwise, use re-encryption, or send `X-Forwarded-Proto` from a front
+server that Caddy trusts as a proxy. Each `web_bot_auth` handler logs the
+warning at most once per config load, so several `web_bot_auth` directives, or
+one in a site on several ports, can each log it.
+
 ## Access log
 
 Caddy's access log records request headers, including `Signature`. A
