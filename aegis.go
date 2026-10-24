@@ -30,9 +30,16 @@ var tweakFetcher func(*samesame.FetcherOptions)
 
 // Handler checks the Web Bot Auth signature of each request with samesame,
 // writes the outcome and its details to the {web_bot_auth.*} placeholders, and
-// passes the request on. Every setting is optional: an absent one keeps
-// samesame's default.
+// passes the request on unless the mode blocks it. Every setting is optional:
+// an absent mode is observe, and any other absent setting keeps samesame's
+// default.
 type Handler struct {
+	// Which requests are blocked: observe, the default, blocks none; enforce
+	// blocks invalid requests, with the status code samesame suggests; require
+	// also blocks unverified requests, with a 403 and an Accept-Signature
+	// header that asks for a signature.
+	Mode string `json:"mode,omitempty"`
+
 	// The only hosts whose agents' key directories are downloaded, each as
 	// host or host:port; when unset, any host. Agents on other hosts get
 	// unverified.
@@ -131,10 +138,16 @@ func deref[T any](p *T) T {
 	return *p
 }
 
-// Validate rejects a zero or negative number, which samesame would replace
-// with its default, and a min_ttl greater than max_ttl, under which every key
-// directory would stay fresh for max_ttl.
+// Validate rejects an unknown mode, a zero or negative number, which samesame
+// would replace with its default, and a min_ttl greater than max_ttl, under
+// which every key directory would stay fresh for max_ttl.
 func (h *Handler) Validate() error {
+	switch h.Mode {
+	case "", "observe", "enforce", "require":
+	default:
+		return fmt.Errorf("mode must be observe, enforce or require, not %q", h.Mode)
+	}
+
 	if err := errors.Join(
 		checkPositive("fetch_timeout", h.FetchTimeout),
 		checkPositive("max_directory_size", h.MaxDirectorySize),
@@ -220,7 +233,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		)
 	}
 
+	if status, challenge := blockStatus(h.Mode, err); status != 0 {
+		if challenge {
+			// With the default options, WriteChallenge cannot fail.
+			_ = samesame.WriteChallenge(w, samesame.ChallengeOptions{})
+		}
+		// handle_errors routes can show this error's text in a response, so
+		// it carries no samesame error text, which can quote the client's
+		// Signature-Agent header.
+		return caddyhttp.Error(status, fmt.Errorf("blocked %s request: %s", outcome, reason))
+	}
 	return next.ServeHTTP(w, r)
+}
+
+// blockStatus returns the status code with which mode blocks a request that
+// samesame checked with err, and whether the response is a challenge. A zero
+// status lets the request through.
+func blockStatus(mode string, err error) (status int, challenge bool) {
+	outcome := samesame.OutcomeOf(err)
+	switch {
+	case outcome == samesame.OutcomeInvalid && (mode == "enforce" || mode == "require"):
+		return samesame.StatusCode(err), false
+	case outcome == samesame.OutcomeUnverified && mode == "require":
+		return http.StatusForbidden, true
+	}
+	return 0, false
 }
 
 // reasonOf returns the short code for why samesame did not verify a request,

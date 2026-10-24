@@ -19,6 +19,7 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens. Syntax:
 //
 //	web_bot_auth [<matcher>] {
+//		mode                   observe|enforce|require
 //		allowed_hosts          <host...>
 //		fetch_timeout          <duration>
 //		max_directory_size     <size>
@@ -40,6 +41,10 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.NextBlock(0) {
 		var err error
 		switch d.Val() {
+		case "mode":
+			if !d.AllArgs(&h.Mode) {
+				return d.ArgErr()
+			}
 		case "allowed_hosts":
 			hosts := d.RemainingArgs()
 			if len(hosts) == 0 {
