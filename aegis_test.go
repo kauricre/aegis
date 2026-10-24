@@ -458,7 +458,7 @@ func TestSettingsReachSamesame(t *testing.T) {
 			if err := caddy.StrictUnmarshalJSON(b, &decoded); err != nil {
 				t.Fatal(err)
 			}
-			fetcher, verifier := decoded.options()
+			fetcher, verifier, _ := decoded.options()
 			if !reflect.DeepEqual(fetcher, tc.fetcher) {
 				t.Errorf("fetcher options = %+v, want %+v", fetcher, tc.fetcher)
 			}

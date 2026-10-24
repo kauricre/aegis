@@ -81,6 +81,10 @@ type Handler struct {
 	// more gets invalid.
 	MaxSignatures *int `json:"max_signatures,omitempty"`
 
+	// The most nonces remembered at once to detect replays, across all
+	// agents.
+	MaxNonces *int `json:"max_nonces,omitempty"`
+
 	verifier *samesame.Verifier
 	logger   *zap.Logger
 }
@@ -97,11 +101,12 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
 
-	fetcherOpts, verifierOpts := h.options()
+	fetcherOpts, verifierOpts, nonceStoreSize := h.options()
 	if tweakFetcher != nil {
 		tweakFetcher(&fetcherOpts)
 	}
 	verifierOpts.Resolver = samesame.NewFetcher(fetcherOpts)
+	verifierOpts.NonceStore = samesame.NewMemoryNonceStore(nonceStoreSize)
 	v, err := samesame.NewVerifier(verifierOpts)
 	if err != nil {
 		return err
@@ -110,9 +115,10 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// options returns samesame's options for the settings. An absent setting
-// stays zero, which samesame replaces with its own default.
-func (h *Handler) options() (samesame.FetcherOptions, samesame.VerifierOptions) {
+// options returns samesame's options for the settings, and the size of the
+// nonce store. An absent setting stays zero, which samesame replaces with its
+// own default.
+func (h *Handler) options() (fetcher samesame.FetcherOptions, verifier samesame.VerifierOptions, nonceStoreSize int) {
 	return samesame.FetcherOptions{
 		AllowedHosts:         h.AllowedHosts,
 		Timeout:              time.Duration(deref(h.FetchTimeout)),
@@ -127,7 +133,7 @@ func (h *Handler) options() (samesame.FetcherOptions, samesame.VerifierOptions) 
 		MaxValidity:   time.Duration(deref(h.MaxValidity)),
 		ClockSkew:     time.Duration(deref(h.ClockSkew)),
 		MaxSignatures: deref(h.MaxSignatures),
-	}
+	}, deref(h.MaxNonces)
 }
 
 func deref[T any](p *T) T {
@@ -160,6 +166,7 @@ func (h *Handler) Validate() error {
 		checkPositive("max_validity", h.MaxValidity),
 		checkPositive("clock_skew", h.ClockSkew),
 		checkPositive("max_signatures", h.MaxSignatures),
+		checkPositive("max_nonces", h.MaxNonces),
 	); err != nil {
 		return err
 	}

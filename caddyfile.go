@@ -32,6 +32,7 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 //		max_validity           <duration>
 //		clock_skew             <duration>
 //		max_signatures         <n>
+//		max_nonces             <n>
 //	}
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume directive name
@@ -73,6 +74,8 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			h.ClockSkew, err = arg(d, parseDuration)
 		case "max_signatures":
 			h.MaxSignatures, err = arg(d, strconv.Atoi)
+		case "max_nonces":
+			h.MaxNonces, err = arg(d, strconv.Atoi)
 		default:
 			return d.Errf("unrecognized subdirective %q", d.Val())
 		}
