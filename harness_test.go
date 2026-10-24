@@ -120,7 +120,15 @@ func serveSite(t *testing.T, scheme, global, directives string) site {
 	}
 	t.Cleanup(func() { tweakFetcher = nil })
 
-	s := site{url: scheme + "://" + freeAddr(t), log: filepath.Join(dir, "aegis.log")}
+	addr := freeAddr(t)
+	s := site{url: scheme + "://" + addr, log: filepath.Join(dir, "aegis.log")}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A site address without a host serves every Host header, also the one a
+	// test vector is signed for.
+	siteAddr := scheme + "://:" + port
 	var certs string
 	if scheme == "https" {
 		certs = "tls " + certFile + " " + keyFile
@@ -146,7 +154,7 @@ func serveSite(t *testing.T, scheme, global, directives string) site {
 	%s
 	%s
 }
-`, dir, global, s.log, s.url, certs, directives)
+`, dir, global, s.log, siteAddr, certs, directives)
 	}
 
 	s.load(t, directives)
