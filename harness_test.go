@@ -1,0 +1,222 @@
+package aegis
+
+import (
+	"crypto"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/TecharoHQ/samesame"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig"
+	_ "github.com/caddyserver/caddy/v2/modules/standard"
+)
+
+// localTLS returns the certificate that every httptest TLS server uses and a
+// pool that trusts it. Caddy serves the same certificate, so the pool trusts
+// Caddy and every key directory.
+var localTLS = sync.OnceValues(func() (tls.Certificate, *x509.CertPool) {
+	srv := httptest.NewTLSServer(nil)
+	defer srv.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return srv.TLS.Certificates[0], pool
+})
+
+// newAgent returns samesame's signer for a new agent whose key directory is
+// served from a local HTTPS server until the test ends.
+func newAgent(t *testing.T) *samesame.Signer {
+	t.Helper()
+	key, err := samesame.GenerateKey(samesame.AlgEd25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewUnstartedServer(nil)
+	authority := srv.Listener.Addr().String()
+	directory, err := samesame.NewDirectoryHandler([]crypto.Signer{key}, samesame.DirectoryHandlerOptions{
+		Authorities: []string{authority},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle(samesame.WellKnownPath, directory)
+	srv.Config.Handler = mux
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	signer, err := samesame.NewSigner(key, samesame.SignerOptions{AgentOrigin: "https://" + authority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+// site is Caddy running in-process with one HTTPS site.
+type site struct {
+	url string
+	log string // file that receives the module's logs
+}
+
+// serve runs Caddy from a real Caddyfile whose only site, on a free local
+// port, holds directives. Caddy stops when the test ends. The config keeps
+// Caddy away from the user's own Caddy data and config directories.
+func serve(t *testing.T, directives string) site {
+	t.Helper()
+	dir := t.TempDir()
+
+	cert, pool := localTLS()
+	key, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	writeFile(t, certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))
+	writeFile(t, keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}))
+
+	// Key directories run on loopback with a test certificate, which
+	// samesame refuses unless told otherwise.
+	tweakFetcher = func(o *samesame.FetcherOptions) {
+		o.AllowPrivateAddresses = true
+		o.TLSConfig = &tls.Config{RootCAs: pool}
+	}
+	t.Cleanup(func() { tweakFetcher = nil })
+
+	s := site{url: "https://" + freeAddr(t), log: filepath.Join(dir, "aegis.log")}
+	caddyfile := fmt.Sprintf(`{
+	admin off
+	persist_config off
+	storage file_system %s
+	storage_clean_interval off
+	auto_https off
+	default_bind 127.0.0.1
+	log aegis {
+		output file %s
+		format json
+		level DEBUG
+		include http.handlers.web_bot_auth
+	}
+}
+
+%s {
+	tls %s %s
+	%s
+}
+`, dir, s.log, s.url, certFile, keyFile, directives)
+
+	cfg, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(caddyfile), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := caddy.Load(cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := caddy.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	return s
+}
+
+func (s site) send(t *testing.T, r *http.Request) string {
+	t.Helper()
+	_, pool := localTLS()
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig:   &tls.Config{RootCAs: pool},
+		DisableKeepAlives: true,
+	}}
+	resp, err := client.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// logs returns what the module has logged so far, one JSON object per line.
+func (s site) logs(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(s.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func get(t *testing.T, url string) *http.Request {
+	t.Helper()
+	r, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func post(t *testing.T, url, body string) *http.Request {
+	t.Helper()
+	r, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func sign(t *testing.T, agent *samesame.Signer, r *http.Request) *http.Request {
+	t.Helper()
+	if err := agent.Sign(r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// tamper changes the first byte of r's signature and returns r.
+func tamper(r *http.Request) *http.Request {
+	sig := signature(r)
+	c := "A"
+	if sig[0] == 'A' {
+		c = "B"
+	}
+	r.Header.Set("Signature", samesame.DefaultLabel+"=:"+c+sig[1:]+":")
+	return r
+}
+
+// signature returns the base64 signature in r's Signature header, which
+// samesame's signer writes as sig1=:<base64>:.
+func signature(r *http.Request) string {
+	sig := r.Header.Get("Signature")
+	return strings.TrimSuffix(strings.TrimPrefix(sig, samesame.DefaultLabel+"=:"), ":")
+}
+
+// freeAddr returns a loopback address that nothing listens on.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().String()
+}
+
+func writeFile(t *testing.T, name string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(name, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
