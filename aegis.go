@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/TecharoHQ/samesame"
@@ -93,6 +94,10 @@ type Handler struct {
 
 	verifier *samesame.Verifier
 	logger   *zap.Logger
+
+	// Whether the handler has logged its warning about insecure_transport.
+	// Each config load makes new handlers, so each load can warn again.
+	warned *atomic.Bool
 }
 
 // CaddyModule returns the Caddy module information.
@@ -106,6 +111,7 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 // Provision builds the verifier from the settings.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
+	h.warned = new(atomic.Bool)
 
 	fetcherOpts, verifierOpts, nonceStoreSize := h.options()
 	if tweakFetcher != nil {
@@ -113,6 +119,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	verifierOpts.Resolver = samesame.NewFetcher(fetcherOpts)
 	verifierOpts.NonceStore = samesame.NewMemoryNonceStore(nonceStoreSize)
+	verifierOpts.Scheme = clientScheme
 	v, err := samesame.NewVerifier(verifierOpts)
 	if err != nil {
 		return err
@@ -148,6 +155,35 @@ func deref[T any](p *T) T {
 		return zero
 	}
 	return *p
+}
+
+// clientScheme returns the scheme the client used, which samesame uses to
+// refuse signatures sent over plain HTTP and to rebuild the signed URL. It
+// trusts X-Forwarded-Proto only from peers that Caddy trusts as proxies, so
+// the module needs no setting of its own: from such a peer, the last line of
+// the header decides; otherwise the connection's own TLS does. wss counts as
+// https, because Traefik sends it for WebSocket upgrades.
+func clientScheme(r *http.Request) string {
+	if proto := r.Header.Values("X-Forwarded-Proto"); len(proto) > 0 && fromTrustedProxy(r) {
+		switch proto[len(proto)-1] {
+		case "https", "wss":
+			return "https"
+		}
+		return "http"
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+// fromTrustedProxy reports whether the trusted_proxy var marks the peer that
+// sent r as a trusted proxy. Caddy sets the var from trusted_proxies and
+// trusted_proxies_unix before any handler runs.
+func fromTrustedProxy(r *http.Request) bool {
+	// Config can set the trusted_proxy var to a value of any type.
+	trusted, _ := caddyhttp.GetVar(r.Context(), caddyhttp.TrustedProxyVarKey).(bool)
+	return trusted
 }
 
 // Validate rejects an unknown mode, a zero or negative number, which samesame
@@ -252,6 +288,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			zap.Bool("signed", signed),
 			zap.String("remote_ip", remoteIP),
 		)
+
+		// The module cannot read trusted_proxies to check the setup when the
+		// config loads, so the handler's first insecure_transport outcome
+		// after each load logs how to fix it.
+		if errors.Is(err, samesame.ErrInsecureTransport) && h.warned.CompareAndSwap(false, true) {
+			fix := "signatures need HTTPS; behind a front server that ends TLS, use re-encryption, or send X-Forwarded-Proto from a front server that Caddy trusts as a proxy (trusted_proxies, or trusted_proxies_unix for a Unix socket)"
+			if len(r.Header.Values("X-Forwarded-Proto")) > 0 && !fromTrustedProxy(r) {
+				fix = "X-Forwarded-Proto was ignored because the peer is not a trusted proxy; add the front server to trusted_proxies, or set trusted_proxies_unix for a Unix socket"
+			}
+			h.logger.Warn("signed request over plain HTTP got insecure_transport: "+fix, zap.String("remote_ip", remoteIP))
+		}
 	}
 
 	if status, challenge := blockStatus(h.Mode, err); status != 0 {
