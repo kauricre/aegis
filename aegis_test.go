@@ -666,3 +666,61 @@ func TestMaxNonces(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentityHeader(t *testing.T) {
+	agent, other := newAgent(t), newAgent(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, "%q", r.Header.Values("Web-Bot-Auth-Agent"))
+	}))
+	t.Cleanup(upstream.Close)
+	addr := upstream.Listener.Addr().String()
+
+	// The values of the header that the upstream receives from each kind of
+	// request. Every request also carries a copy of the header from the
+	// client, which claims to be the other agent.
+	verified, claimed, none := fmt.Sprintf("[%q]", agent.directory), fmt.Sprintf("[%q]", other.directory), "[]"
+	for _, tc := range []struct {
+		name, directives                        string
+		verified, invalid, unverified, unsigned string
+	}{
+		{"identity_header", `
+	web_bot_auth {
+		identity_header Web-Bot-Auth-Agent
+	}
+	reverse_proxy ` + addr, verified, none, none, none},
+		{"no identity_header", `
+	web_bot_auth
+	reverse_proxy ` + addr, claimed, claimed, claimed, claimed},
+		{"identity_header with blocked requests sent upstream by handle_errors", `
+	web_bot_auth {
+		mode require
+		identity_header Web-Bot-Auth-Agent
+	}
+	reverse_proxy ` + addr + `
+	handle_errors {
+		reverse_proxy ` + addr + `
+	}`, verified, none, none, none},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := serve(t, tc.directives)
+
+			for _, req := range []struct {
+				name string
+				r    *http.Request
+				want string
+			}{
+				{"verified", sign(t, agent, get(t, s.url)), tc.verified},
+				{"invalid", tamper(sign(t, agent, get(t, s.url))), tc.invalid},
+				{"unverified signed", claim(sign(t, agent, get(t, s.url)), other), tc.unverified},
+				{"unsigned", get(t, s.url), tc.unsigned},
+			} {
+				t.Run(req.name, func(t *testing.T) {
+					req.r.Header.Set("Web-Bot-Auth-Agent", other.directory)
+					if got := s.send(t, req.r); got != req.want {
+						t.Errorf("upstream received %s, want %s", got, req.want)
+					}
+				})
+			}
+		})
+	}
+}

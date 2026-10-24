@@ -18,6 +18,8 @@ func TestCaddyfile(t *testing.T) {
 		{"with an unknown subdirective", "web_bot_auth {\n\t\tno_such_setting on\n\t}", true},
 		{"mode without a value", "web_bot_auth {\n\t\tmode\n\t}", true},
 		{"mode with two values", "web_bot_auth {\n\t\tmode enforce require\n\t}", true},
+		{"identity_header without a value", "web_bot_auth {\n\t\tidentity_header\n\t}", true},
+		{"identity_header with two values", "web_bot_auth {\n\t\tidentity_header Web-Bot-Auth-Agent X-Agent\n\t}", true},
 		{"allowed_hosts without a host", "web_bot_auth {\n\t\tallowed_hosts\n\t}", true},
 		{"a setting without a value", "web_bot_auth {\n\t\tfetch_timeout\n\t}", true},
 		{"a setting with two values", "web_bot_auth {\n\t\tfetch_timeout 1s 2s\n\t}", true},
