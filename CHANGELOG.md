@@ -17,6 +17,7 @@ version.
 - Placeholders `{web_bot_auth.signed}`, `{web_bot_auth.reason}`, `{web_bot_auth.agent}`, `{web_bot_auth.keyid}` and `{web_bot_auth.label}`.
 - The `debug` log line of each signed request carries the outcome, reason, agent, key ID, label, signed flag and remote IP.
 - `web_bot_auth` checks signatures against the method and URL the request arrived with, so `method`, `rewrite`, `uri`, `try_files` and `handle_path` do not break them.
+- Optional settings for key discovery and signature checks, passed to samesame: `allowed_hosts`, `fetch_timeout`, `max_directory_size`, `ttl`, `min_ttl`, `max_ttl`, `negative_ttl`, `max_cache_entries`, `max_concurrent_fetches`, `max_validity`, `clock_skew` and `max_signatures`.
 
 ### Changed
 
