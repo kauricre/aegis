@@ -14,6 +14,8 @@ version.
 ### Added
 
 - `web_bot_auth` directive: checks the Web Bot Auth signature of each request and writes the outcome to `{web_bot_auth.outcome}`.
+- Placeholders `{web_bot_auth.signed}`, `{web_bot_auth.reason}`, `{web_bot_auth.agent}`, `{web_bot_auth.keyid}` and `{web_bot_auth.label}`.
+- The `debug` log line of each signed request carries the outcome, reason, agent, key ID, label, signed flag and remote IP.
 
 ### Changed
 
