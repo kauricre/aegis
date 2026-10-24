@@ -21,6 +21,7 @@ version.
 - `mode` setting: `observe`, the default, never blocks; `enforce` blocks invalid requests with the status code samesame suggests; `require` also blocks unverified requests with a `403` and an `Accept-Signature` challenge.
 - Replay protection, always on: a request whose signature repeats the nonce of a verified signature from the same agent gets `invalid` with reason `replay`; the `max_nonces` setting sets how many nonces are remembered.
 - `identity_header` setting: names a request header that `web_bot_auth` removes from every request it handles and, on a verified request, sets to the agent's key directory URL, so the app behind Caddy knows which agent sent the request and no client can fake it.
+- Signatures verify behind a front server that ends TLS and sends plain HTTP, when Caddy's `trusted_proxies` holds it: `web_bot_auth` then takes the scheme from `X-Forwarded-Proto`, and the first `insecure_transport` outcome after each config load logs a warning that names the fix.
 
 ### Changed
 
