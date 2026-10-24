@@ -19,6 +19,7 @@ version.
 - `web_bot_auth` checks signatures against the method and URL the request arrived with, so `method`, `rewrite`, `uri`, `try_files` and `handle_path` do not break them.
 - Optional settings for key discovery and signature checks, passed to samesame: `allowed_hosts`, `fetch_timeout`, `max_directory_size`, `ttl`, `min_ttl`, `max_ttl`, `negative_ttl`, `max_cache_entries`, `max_concurrent_fetches`, `max_validity`, `clock_skew` and `max_signatures`.
 - `mode` setting: `observe`, the default, never blocks; `enforce` blocks invalid requests with the status code samesame suggests; `require` also blocks unverified requests with a `403` and an `Accept-Signature` challenge.
+- Replay protection, always on: a request whose signature repeats the nonce of a verified signature from the same agent gets `invalid` with reason `replay`; the `max_nonces` setting sets how many nonces are remembered.
 
 ### Changed
 
