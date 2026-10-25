@@ -1,0 +1,24 @@
+# Only verified requests reach the API under /api/: require blocks invalid
+# requests with the status code samesame suggests, and unverified ones,
+# unsigned ones included, with a 403 challenge that tells the agent how to
+# sign. Any agent that serves its key directory over HTTPS can get verified;
+# to let only some agents in, set allowed_hosts or match
+# {web_bot_auth.agent}.
+#
+# The rest of the site stays in observe mode. Its web_bot_auth shares the
+# nonces of verified signatures with the one on /api/, so a signed request
+# with a nonce to any other path, replayed to /api/, gets replay and is
+# blocked.
+example.com {
+	handle /api/* {
+		web_bot_auth {
+			mode require
+		}
+		reverse_proxy api:8080
+	}
+
+	handle {
+		web_bot_auth
+		reverse_proxy app:8080
+	}
+}

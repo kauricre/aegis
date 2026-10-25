@@ -1,0 +1,28 @@
+# observe, the default mode, blocks nothing. Verified requests from OpenAI's
+# agent go straight to the app, and all other requests go to Anubis, which
+# runs in front of the same app. The access log records the outcome of each
+# request and leaves out its Signature header, which could be replayed.
+example.com {
+	web_bot_auth
+
+	@openai vars {web_bot_auth.agent} https://chatgpt.com/.well-known/http-message-signatures-directory
+	handle @openai {
+		reverse_proxy app:8080
+	}
+
+	handle {
+		# Passes the client's IP to Anubis, as Anubis's Caddy docs show.
+		reverse_proxy anubis:8923 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	log {
+		format filter {
+			request>headers>Signature delete
+		}
+	}
+	log_append wba_outcome {web_bot_auth.outcome}
+	log_append wba_reason {web_bot_auth.reason}
+	log_append wba_agent {web_bot_auth.agent}
+}

@@ -1,0 +1,18 @@
+# A front server on the same machine, such as nginx, ends the client's TLS
+# and sends plain HTTP to 127.0.0.1:8000, keeping the client's Host header
+# and setting X-Forwarded-Proto. web_bot_auth takes the scheme from that
+# header only because trusted_proxies holds the front server's address.
+#
+# Prefer re-encryption or TLS passthrough when the front server supports
+# them: Caddy then ends TLS itself and needs no setting for web_bot_auth.
+{
+	servers {
+		trusted_proxies static 127.0.0.1/32
+	}
+}
+
+http://example.com:8000 {
+	bind 127.0.0.1
+	web_bot_auth
+	reverse_proxy app:8080
+}
