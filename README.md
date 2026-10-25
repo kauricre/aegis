@@ -150,6 +150,10 @@ directory, the value of `{web_bot_auth.agent}`.
 from every request it handles, whatever the outcome. Without that, any client
 could send the header itself and pass as a verified agent. Blocked requests
 lose it too, because `handle_errors` routes can still send them to the app.
+Copies whose names differ only in case, `-`, `_` or `.` go too, because
+CGI-style apps, such as a PHP app behind `php_fastcgi`, read all of them as
+one variable: for `Web_Bot_Auth_Agent`, the client's `Web-Bot-Auth-Agent`
+would otherwise reach the app as `HTTP_WEB_BOT_AUTH_AGENT`.
 
 Only requests that a `web_bot_auth` with `identity_header` handles lose the
 client's copy. A request that its matcher skips, or that takes a route without
