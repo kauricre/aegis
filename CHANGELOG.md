@@ -13,6 +13,16 @@ version.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Fixed
+
+## [0.1.0] - 2026-10-25
+
+### Added
+
 - `web_bot_auth` directive: checks the Web Bot Auth signature of each request and writes the outcome to `{web_bot_auth.outcome}`. [#1](https://github.com/kauricre/aegis/pull/1)
 - Placeholders `{web_bot_auth.signed}`, `{web_bot_auth.reason}`, `{web_bot_auth.agent}`, `{web_bot_auth.keyid}` and `{web_bot_auth.label}`. [#1](https://github.com/kauricre/aegis/pull/1)
 - The `debug` log line of each signed request carries the outcome, reason, agent, key ID, label, signed flag and remote IP. [#1](https://github.com/kauricre/aegis/pull/1)
@@ -28,9 +38,3 @@ version.
 - The README's minimal Caddyfile routes on one agent's `{web_bot_auth.agent}` instead of the `verified` outcome alone, which anyone who serves a key directory over HTTPS can get. [#1](https://github.com/kauricre/aegis/pull/1)
 - `identity_header` also removes client copies whose names differ only in case, `-`, `_` or `.`, which CGI apps, such as a PHP app behind `php_fastcgi`, read as the same header. [#1](https://github.com/kauricre/aegis/pull/1)
 - The README's minimal Caddyfile passes the client's IP to Anubis in `X-Real-IP`, as Anubis's Caddy docs show; without it, Anubis by default answers requests from clients on private, loopback or CGNAT addresses with an error. [#1](https://github.com/kauricre/aegis/pull/1)
-
-### Changed
-
-### Deprecated
-
-### Fixed
