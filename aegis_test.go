@@ -2,6 +2,7 @@ package aegis
 
 import (
 	"cmp"
+	"crypto"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -543,6 +544,7 @@ func TestValidate(t *testing.T) {
 func TestInvalidSettingFailsConfigLoad(t *testing.T) {
 	for _, tc := range []struct{ setting, wantErr string }{
 		{"fetch_timeout 0", "fetch_timeout must be positive"},
+		{"max_concurrent_fetches -1", "max_concurrent_fetches must be positive"},
 		{"mode block", `mode must be observe, enforce or require, not "block"`},
 	} {
 		t.Run(tc.setting, func(t *testing.T) {
@@ -1065,4 +1067,193 @@ func TestParallelRequestsDuringReload(t *testing.T) {
 	case <-reloadedAnswered:
 	case <-failed:
 	}
+}
+
+func TestAbandonedRequestLeavesNoDownload(t *testing.T) {
+	abandoned, next := newAgent(t), newAgent(t)
+	// The held download cannot time out during the test, so the only request
+	// that can get discovery_failed before release is the abandoned one.
+	s := serve(t, `
+	web_bot_auth {
+		max_concurrent_fetches 1
+		fetch_timeout 1m
+	}
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+	release := holdDownloadSlot(t, s, next)
+
+	// The client disconnects as soon as it has sent the request, which waits
+	// for the slot.
+	_, pool := localTLS()
+	conn, err := tls.Dial("tcp", strings.TrimPrefix(s.url, "https://"), &tls.Config{RootCAs: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sign(t, abandoned, get(t, s.url)).Write(conn); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	// web_bot_auth logs the request once the request stops waiting.
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(s.logs(t), `"reason":"discovery_failed"`) {
+		if time.Now().After(deadline) {
+			t.Fatal("web_bot_auth logged no outcome for the abandoned request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	release()
+	if got := s.send(t, sign(t, next, get(t, s.url))); got != "verified " {
+		t.Errorf("response once the slot is free = %q, want %q", got, "verified ")
+	}
+	if n := abandoned.requests.Load(); n != 0 {
+		t.Errorf("the abandoned agent's key directory server got %d requests, want 0", n)
+	}
+}
+
+func TestRequestsWhileDownloadSlotIsBusy(t *testing.T) {
+	cached, uncached := newAgent(t), newAgent(t)
+	// The held download cannot time out during the test.
+	s := serve(t, `
+	web_bot_auth {
+		max_concurrent_fetches 1
+		fetch_timeout 1m
+	}
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+	if got := s.send(t, sign(t, cached, get(t, s.url))); got != "verified " {
+		t.Fatalf("response = %q, want %q", got, "verified ")
+	}
+	release := holdDownloadSlot(t, s, cached)
+
+	select {
+	case got := <-sendInBackground(sign(t, cached, get(t, s.url))):
+		if got != "verified " {
+			t.Errorf("response from the cached agent = %q, want %q", got, "verified ")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the cached agent's request waited for the slot")
+	}
+
+	answered := sendInBackground(sign(t, uncached, get(t, s.url)))
+	select {
+	case got := <-answered:
+		t.Fatalf("response from the new agent while the slot is busy = %q, want none yet", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	if got := <-answered; got != "verified " {
+		t.Errorf("response from the new agent once the slot is free = %q, want %q", got, "verified ")
+	}
+}
+
+func TestReplacedKeyStopsVerifyingWhileDownloadSlotIsBusy(t *testing.T) {
+	// The agent's key directory server serves the directory publish last set.
+	srv := httptest.NewUnstartedServer(nil)
+	authority := srv.Listener.Addr().String()
+	var directory atomic.Value
+	publish := func(key crypto.Signer) {
+		t.Helper()
+		h, err := samesame.NewDirectoryHandler([]crypto.Signer{key}, samesame.DirectoryHandlerOptions{Authorities: []string{authority}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		directory.Store(h)
+	}
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directory.Load().(http.Handler).ServeHTTP(w, r)
+	})
+	key, err := samesame.GenerateKey(samesame.AlgEd25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish(key)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	signer, err := samesame.NewSigner(key, samesame.SignerOptions{AgentOrigin: "https://" + authority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := testAgent{Signer: signer}
+
+	s := serve(t, `
+	web_bot_auth {
+		max_concurrent_fetches 1
+		min_ttl 500ms
+		max_ttl 500ms
+	}
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason}"`)
+	if got := s.send(t, sign(t, agent, get(t, s.url))); got != "verified " {
+		t.Fatalf("response = %q, want %q", got, "verified ")
+	}
+
+	// The agent replaces its key, and the cached key directory goes stale.
+	other, err := samesame.GenerateKey(samesame.AlgEd25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish(other)
+	time.Sleep(600 * time.Millisecond)
+	release := holdDownloadSlot(t, s, agent)
+
+	answered := sendInBackground(sign(t, agent, get(t, s.url)))
+	select {
+	case got := <-answered:
+		t.Fatalf("response while the slot is busy = %q, want none yet", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	if got := <-answered; got != "unverified key_unknown" {
+		t.Errorf("response with the replaced key = %q, want %q", got, "unverified key_unknown")
+	}
+}
+
+// holdDownloadSlot sends a request signed by agent whose Signature-Agent
+// names a key directory that answers only once release is called, and
+// returns once the download of that directory has started. On a site with
+// max_concurrent_fetches 1, the download holds the only slot until then.
+func holdDownloadSlot(t *testing.T, s site, agent testAgent) (release func()) {
+	t.Helper()
+	started, unblock := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-unblock
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	release = sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(release)
+
+	answered := sendInBackground(claim(sign(t, agent, get(t, s.url)), testAgent{directory: srv.URL + samesame.WellKnownPath}))
+	select {
+	case <-started:
+	case got := <-answered:
+		t.Fatalf("response to the request that names the held key directory = %q, want none yet", got)
+	}
+	return release
+}
+
+// sendInBackground sends r as site.do does, from another goroutine, and
+// returns a channel that receives the response body, or the error, once the
+// request ends.
+func sendInBackground(r *http.Request) <-chan string {
+	answered := make(chan string, 1)
+	go func() {
+		_, pool := localTLS()
+		client := &http.Client{Transport: &http.Transport{
+			TLSClientConfig:   &tls.Config{RootCAs: pool},
+			DisableKeepAlives: true,
+		}}
+		resp, err := client.Do(r)
+		if err != nil {
+			answered <- err.Error()
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			answered <- err.Error()
+			return
+		}
+		answered <- string(body)
+	}()
+	return answered
 }
