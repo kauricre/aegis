@@ -195,7 +195,7 @@ web_bot_auth {
 | `min_ttl`, `max_ttl` | the shortest and longest time a downloaded key directory stays fresh, whatever its response or `ttl` says | `1m`, `24h` |
 | `negative_ttl` | the base of the wait after a failed download before the next one | `30s`: the first failure waits 15s to 30s, each further failure doubles the wait, a `Retry-After` raises it, and it never exceeds 5m |
 | `max_cache_entries` | the most key directories cached at once, counting those whose download failed | `10000` |
-| `max_concurrent_fetches` | the most key directory downloads in flight at once, across all agents | `64` |
+| `max_concurrent_fetches` | the most key directory downloads in flight at once, across all agents, and the most lookups at once of agents whose key directory has not been downloaded | `64` |
 | `max_validity` | the longest time from `created` to `expires` accepted in a signature | `24h` |
 | `clock_skew` | the tolerance applied to `created` and `expires` | `1m` |
 | `max_signatures` | the most signatures one request may carry; a request with more gets `invalid` | `4` |
@@ -210,6 +210,16 @@ samesame's default. In JSON config, the settings are fields of the
 A stale key directory is downloaded again when a signed request names it.
 While those downloads fail, samesame keeps using the stale directory, so
 `max_ttl` does not limit how long a key keeps verifying.
+
+Aegis remembers up to `max_cache_entries` agents whose key directory has been
+downloaded, and requests that name one of them go straight to the cache. A
+signed request that names any other agent, such as a new one or one whose
+downloads have only failed, waits while `max_concurrent_fetches` lookups of
+such agents are running, and requests that name the same agent share one
+lookup. A request stops waiting when its client disconnects, and a lookup that
+no request waits for any more is dropped before it starts, so these requests
+queue no downloads for clients that are gone. A started lookup counts until
+samesame answers it, also once no request waits for it.
 
 All `web_bot_auth` directives with the same key discovery settings, in any
 site, share one cache of downloaded key directories. Those settings are
