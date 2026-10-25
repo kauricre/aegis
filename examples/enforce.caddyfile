@@ -1,0 +1,11 @@
+# enforce blocks invalid requests, such as those with a wrong, expired or
+# replayed signature, with the status code samesame suggests: 400 for
+# malformed, 429 for replay and 403 for any other reason. Verified and
+# unverified requests, unsigned ones included, reach the app.
+example.com {
+	web_bot_auth {
+		mode enforce
+	}
+
+	reverse_proxy app:8080
+}
