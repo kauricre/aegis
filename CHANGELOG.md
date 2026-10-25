@@ -29,3 +29,5 @@ version.
 ### Deprecated
 
 ### Fixed
+
+- Signed requests that name new agents and then disconnect no longer pile up waiting key directory downloads until Caddy runs out of memory: a lookup of an agent whose key directory has not been downloaded waits for one of `max_concurrent_fetches` slots only while a request waits for it.
