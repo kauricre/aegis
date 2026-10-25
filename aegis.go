@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,9 +62,10 @@ type Handler struct {
 	Mode string `json:"mode,omitempty"`
 
 	// The request header that tells upstreams which agent sent a verified
-	// request, set to the agent's key directory URL. Any copy a client sends
-	// is removed from every request, whatever the outcome. When unset, no
-	// header is removed or set.
+	// request, set to the agent's key directory URL. Any copy a client sends,
+	// also one whose name differs only in case, '-', '_' or '.', which CGI
+	// upstreams read as the same header, is removed from every request,
+	// whatever the outcome. When unset, no header is removed or set.
 	IdentityHeader string `json:"identity_header,omitempty"`
 
 	// The only hosts whose agents' key directories are downloaded, each as
@@ -449,9 +451,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// Any client could send the identity header to pass as a verified agent,
 	// so it is removed before anything else, which keeps it off every path
 	// out of this handler, including blocked requests that handle_errors
-	// routes send upstream. A signature that covers it never verifies.
+	// routes send upstream. A signature that covers it never verifies. CGI
+	// upstreams pass headers whose names differ only in case, '-', '_' or '.'
+	// under one name, so a copy with any such spelling is removed too.
 	if h.IdentityHeader != "" {
-		r.Header.Del(h.IdentityHeader)
+		identity := cgiName(h.IdentityHeader)
+		for name := range r.Header {
+			if cgiName(name) == identity {
+				delete(r.Header, name)
+			}
+		}
 	}
 
 	// samesame checks the method and URL the request arrived with, which
@@ -527,6 +536,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 	return next.ServeHTTP(w, r)
 }
+
+// cgiName returns the name under which CGI upstreams pass the header named
+// header, without the HTTP_ prefix: Caddy's php_fastcgi upper-cases the name
+// and turns '-' into '_', and PHP also turns '.' into '_'.
+func cgiName(header string) string {
+	return strings.ToUpper(cgiNameReplacer.Replace(header))
+}
+
+var cgiNameReplacer = strings.NewReplacer("-", "_", ".", "_")
 
 // blockStatus returns the status code with which mode blocks a request that
 // samesame checked with err, and whether the response is a challenge. A zero
