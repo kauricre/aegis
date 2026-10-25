@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/fcgi"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
@@ -726,6 +728,52 @@ func TestIdentityHeader(t *testing.T) {
 						t.Errorf("upstream received %s, want %s", got, req.want)
 					}
 				})
+			}
+		})
+	}
+}
+
+// TestIdentityHeaderThroughFastCGI checks the identity header that a FastCGI
+// app, such as a PHP app behind php_fastcgi, receives. FastCGI passes headers
+// as CGI variables, which turn '-' into '_', so a client's Web-Bot-Auth-Agent
+// and the module's Web_Bot_Auth_Agent both become HTTP_WEB_BOT_AUTH_AGENT.
+func TestIdentityHeaderThroughFastCGI(t *testing.T) {
+	agent, other := newAgent(t), newAgent(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	// Go's FastCGI server turns HTTP_WEB_BOT_AUTH_AGENT back into the
+	// Web-Bot-Auth-Agent header.
+	go func() {
+		_ = fcgi.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprintf(w, "%q", r.Header.Values("Web-Bot-Auth-Agent"))
+		}))
+	}()
+	s := serve(t, `
+	web_bot_auth {
+		identity_header Web_Bot_Auth_Agent
+	}
+	reverse_proxy `+l.Addr().String()+` {
+		transport fastcgi
+	}`)
+
+	verified, none := fmt.Sprintf("[%q]", agent.directory), "[]"
+	for _, req := range []struct {
+		name string
+		r    *http.Request
+		want string
+	}{
+		{"verified", sign(t, agent, get(t, s.url)), verified},
+		{"invalid", tamper(sign(t, agent, get(t, s.url))), none},
+		{"unverified signed", claim(sign(t, agent, get(t, s.url)), other), none},
+		{"unsigned", get(t, s.url), none},
+	} {
+		t.Run(req.name, func(t *testing.T) {
+			req.r.Header.Set("Web-Bot-Auth-Agent", other.directory)
+			if got := s.send(t, req.r); got != req.want {
+				t.Errorf("FastCGI app received %s, want %s", got, req.want)
 			}
 		})
 	}
