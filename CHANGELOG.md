@@ -24,14 +24,13 @@ version.
 - Signatures verify behind a front server that ends TLS and sends plain HTTP, when Caddy's `trusted_proxies` holds it: `web_bot_auth` then takes the scheme from `X-Forwarded-Proto`, and the first `insecure_transport` outcome after each config load logs a warning that names the fix.
 - `web_bot_auth` directives with the same key discovery settings share their downloaded key directories, and those with the same `max_nonces` share their nonces, also across config reloads, where an absent setting counts as different from one set to samesame's default: a reload that keeps those settings makes no agent wait for a download, and a replay gets `replay` at each directive that shares the nonces.
 - Example Caddyfiles in `examples/`: `observe` with routing to Anubis, `enforce`, `require` on an API path only, and Caddy behind a front server.
+- A lookup of an agent whose key directory has not been downloaded waits for one of `max_concurrent_fetches` slots only while a request waits for it, so signed requests that name new agents and then disconnect cannot pile up waiting key directory downloads until Caddy runs out of memory.
+- The README's minimal Caddyfile routes on one agent's `{web_bot_auth.agent}` instead of the `verified` outcome alone, which anyone who serves a key directory over HTTPS can get.
+- `identity_header` also removes client copies whose names differ only in case, `-`, `_` or `.`, which CGI apps, such as a PHP app behind `php_fastcgi`, read as the same header.
+- The README's minimal Caddyfile passes the client's IP to Anubis in `X-Real-IP`, as Anubis's Caddy docs show; without it, Anubis by default answers requests from clients on private, loopback or CGNAT addresses with an error.
 
 ### Changed
 
 ### Deprecated
 
 ### Fixed
-
-- Signed requests that name new agents and then disconnect no longer pile up waiting key directory downloads until Caddy runs out of memory: a lookup of an agent whose key directory has not been downloaded waits for one of `max_concurrent_fetches` slots only while a request waits for it.
-- The README's minimal Caddyfile routes on one agent's `{web_bot_auth.agent}` instead of the `verified` outcome alone, which anyone who serves a key directory over HTTPS can get.
-- `identity_header` also removes client copies whose names differ only in case, `-`, `_` or `.`, which CGI apps, such as a PHP app behind `php_fastcgi`, read as the same header.
-- The README's minimal Caddyfile passes the client's IP to Anubis in `X-Real-IP`, as Anubis's Caddy docs show; without it, Anubis by default answers requests from clients on private, loopback or CGNAT addresses with an error.
