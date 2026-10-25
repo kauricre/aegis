@@ -32,3 +32,4 @@ version.
 
 - Signed requests that name new agents and then disconnect no longer pile up waiting key directory downloads until Caddy runs out of memory: a lookup of an agent whose key directory has not been downloaded waits for one of `max_concurrent_fetches` slots only while a request waits for it.
 - The README's minimal Caddyfile routes on one agent's `{web_bot_auth.agent}` instead of the `verified` outcome alone, which anyone who serves a key directory over HTTPS can get.
+- `identity_header` also removes client copies whose names differ only in case, `-`, `_` or `.`, which CGI apps, such as a PHP app behind `php_fastcgi`, read as the same header.
