@@ -20,8 +20,8 @@ xcaddy build --with github.com/kauricre/aegis
 example.com {
 	web_bot_auth
 
-	@verified vars {web_bot_auth.outcome} verified
-	handle @verified {
+	@openai vars {web_bot_auth.agent} https://chatgpt.com/.well-known/http-message-signatures-directory
+	handle @openai {
 		reverse_proxy app:8080
 	}
 
@@ -33,8 +33,15 @@ example.com {
 
 `web_bot_auth` checks the signature of every request, writes the outcome
 (`verified`, `invalid` or `unverified`) to the `{web_bot_auth.outcome}`
-placeholder, and passes the request on. Routes decide what each outcome gets:
-here, verified requests go to the app and all others to Anubis.
+placeholder and the agent of a verified request to `{web_bot_auth.agent}`, and
+passes the request on. Routes decide what each request gets: here, verified
+requests from OpenAI's agent go to the app and all others to Anubis.
+
+`verified` says which agent signed a request, not that the agent is one to
+trust: anyone who serves a key directory over HTTPS can sign requests that get
+`verified`. Grant access by `{web_bot_auth.agent}`, as here. Route on
+`verified` alone only when [`allowed_hosts`](#settings) limits discovery to
+the hosts of agents you trust.
 
 ## Placement
 
@@ -237,6 +244,9 @@ samesame's default, so a directive without `fetch_timeout` and one with
 Discovery is open by default: Aegis downloads the key directory of any agent
 that signs a request. samesame downloads only over HTTPS, follows no
 redirects, and connects only to public addresses; no setting changes that.
+Anyone who serves a key directory from a public HTTPS host can therefore sign
+requests that get `verified`. To trust only some agents, match
+`{web_bot_auth.agent}` in routes or set `allowed_hosts`.
 
 `allowed_hosts` limits discovery to the listed hosts. A correctly signed
 request from an agent on any other host gets `unverified` with reason
