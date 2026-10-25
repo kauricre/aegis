@@ -6,8 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Each entry is one line that ends with a link to the pull request that made the
 change. To release, run `go run ./scripts/changelog <version>` from the
-repository root: it moves the entries under Unreleased into a section for that
-version.
+repository root in a pull request: it moves the entries under Unreleased into a
+section for that version. Merging the pull request tags the release.
 
 ## [Unreleased]
 

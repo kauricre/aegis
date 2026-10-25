@@ -17,3 +17,26 @@ jobs:
       - run: go test -race ./...
       - run: go run github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7 build --with github.com/kauricre/aegis=.
       - run: for f in examples/*.caddyfile; do ./caddy validate --config "$f"; done
+
+  release:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag the release named in CHANGELOG.md
+        run: |
+          version=$(awk '/^## / && seen { print; exit } /^## \[Unreleased\]$/ { seen = 1 }' CHANGELOG.md | sed -E 's/^## \[([^]]*)\].*/\1/')
+          if [ -z "$version" ]; then exit 0; fi
+          if ! echo "$version" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error file=CHANGELOG.md::release heading [$version] is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then exit 0; fi
+          git tag "v$version"
+          git push origin "v$version"
+          # Requesting the version by name makes the proxy add it to its version
+          # list, which @latest reads; otherwise that list can lag behind the tag.
+          curl -fsS "https://proxy.golang.org/github.com/kauricre/aegis/@v/v$version.info"

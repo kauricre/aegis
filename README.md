@@ -18,6 +18,14 @@ This writes a `caddy` binary to the current directory. Aegis needs Caddy
 v2.11.7 or later; xcaddy builds the latest Caddy release unless told
 otherwise.
 
+To test changes that are merged but not released, build from `main`:
+
+```sh
+go run github.com/caddyserver/xcaddy/cmd/xcaddy@latest build --with github.com/kauricre/aegis@main
+```
+
+Replace `main` with a commit hash to build one specific merge.
+
 ## Minimal Caddyfile
 
 ```caddyfile
