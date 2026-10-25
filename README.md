@@ -11,8 +11,12 @@ Build Caddy with the module using [xcaddy](https://github.com/caddyserver/xcaddy
 and Go 1.27 or later:
 
 ```sh
-xcaddy build --with github.com/kauricre/aegis
+go run github.com/caddyserver/xcaddy/cmd/xcaddy@latest build --with github.com/kauricre/aegis
 ```
+
+This writes a `caddy` binary to the current directory. Aegis needs Caddy
+v2.11.7 or later; xcaddy builds the latest Caddy release unless told
+otherwise.
 
 ## Minimal Caddyfile
 
@@ -26,7 +30,9 @@ example.com {
 	}
 
 	handle {
-		reverse_proxy anubis:8923
+		reverse_proxy anubis:8923 {
+			header_up X-Real-IP {remote_host}
+		}
 	}
 }
 ```
@@ -35,13 +41,65 @@ example.com {
 (`verified`, `invalid` or `unverified`) to the `{web_bot_auth.outcome}`
 placeholder and the agent of a verified request to `{web_bot_auth.agent}`, and
 passes the request on. Routes decide what each request gets: here, verified
-requests from OpenAI's agent go to the app and all others to Anubis.
+requests from OpenAI's agent go to the app at `app:8080` and all others to
+[Anubis](https://github.com/TecharoHQ/anubis) at `anubis:8923`. The
+`header_up` line passes the client's IP to Anubis, as Anubis's Caddy docs
+show. To try Aegis without an app or Anubis, see
+[Check the setup](#check-the-setup).
+
+Signatures verify only on requests that reach Caddy over HTTPS. Over plain
+HTTP, a signed request gets `invalid` with reason `insecure_transport`; for a
+server in front of Caddy that ends HTTPS, see
+[Caddy behind another HTTPS server](#caddy-behind-another-https-server).
 
 `verified` says which agent signed a request, not that the agent is one to
 trust: anyone who serves a key directory over HTTPS can sign requests that get
 `verified`. Grant access by `{web_bot_auth.agent}`, as here. Route on
-`verified` alone only when [`allowed_hosts`](#settings) limits discovery to
-the hosts of agents you trust.
+`verified` alone, as `require` does, only where any agent may have access, or
+where [`allowed_hosts`](#settings) limits discovery to the hosts of agents you
+trust.
+
+## Check the setup
+
+`./caddy list-modules | grep web_bot_auth` prints `http.handlers.web_bot_auth`
+when the module is in the build. To see the outcome of each request, try a
+site that responds with it. Save it as `Caddyfile` next to `caddy` and run
+`./caddy run`:
+
+```caddyfile
+{
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+localhost:8443 {
+	web_bot_auth
+	respond "{web_bot_auth.outcome} {web_bot_auth.reason} {web_bot_auth.agent}"
+}
+```
+
+Caddy serves `localhost:8443` over HTTPS with a certificate from its own local
+certificate authority. The global options keep Caddy off ports 80 and 443,
+which Linux reserves for root by default, and keep that authority out of the
+system's trusted certificates, so `curl` needs `-k`. An unsigned request, such
+as `curl -k https://localhost:8443`, gets `unverified no_signature`.
+
+A signed request gets `verified` only when Aegis can download the agent's key
+directory: over HTTPS, with a publicly trusted certificate, from a public
+address. To send signed test requests, sign them with the `Signer` of
+[samesame](https://github.com/TecharoHQ/samesame), the library that Aegis
+checks signatures with, and serve the agent's key directory from a public
+HTTPS host; samesame's README shows both. A key directory on `localhost` or a
+private network gets `unverified` with reason `discovery_failed`.
+
+## Examples
+
+[`examples/`](examples) holds complete Caddyfiles:
+
+- [`observe-anubis.caddyfile`](examples/observe-anubis.caddyfile): `observe`, with one agent routed to the app, all other requests to Anubis, and each outcome in the access log
+- [`enforce.caddyfile`](examples/enforce.caddyfile): `enforce` on the whole site
+- [`require-api.caddyfile`](examples/require-api.caddyfile): `require` on an API path only
+- [`front-server.caddyfile`](examples/front-server.caddyfile): Caddy behind a front server on the same machine that sends plain HTTP
 
 ## Placement
 
@@ -52,6 +110,12 @@ not break signatures, even when they run first.
 Headers are checked as they are when `web_bot_auth` runs, so a directive that
 changes a header the signature covers before then breaks the signature. For
 example, `request_header` setting `Host` makes the outcome `invalid`.
+
+`web_bot_auth` never checks the request body. A signature can cover a
+`Content-Digest` header, but nothing compares that digest with the body, so a
+request whose body differs from the one the agent signed still gets
+`verified`. A signature that covers a trailer field gets `invalid` with reason
+`bad_signature`.
 
 In Caddy's default directive order, `web_bot_auth` runs before `method`, so
 before `rewrite`, `uri`, `try_files`, `request_header` and `handle_path`.
@@ -83,6 +147,23 @@ To route one agent, match the full URL of its key directory:
 ```caddyfile
 @openai vars {web_bot_auth.agent} https://chatgpt.com/.well-known/http-message-signatures-directory
 ```
+
+To find an agent's URL, read the `agent` field of the module's log entries for
+its verified requests, or `{web_bot_auth.agent}` in the access log; see
+[Logs](#logs).
+
+Directives that run before `web_bot_auth`, and their matchers, cannot use the
+placeholders. In Caddy's default directive order, these include `vars`,
+`header` and `redir`: a `header` that sets `{web_bot_auth.outcome}`
+sends that text unreplaced. Defer `header` with `>`, which sets the header as
+the response is written:
+
+```caddyfile
+header >Web-Bot-Auth-Outcome {web_bot_auth.outcome}
+```
+
+A request that `web_bot_auth` blocks gets no deferred header; a `header` in
+`handle_errors` can set it there.
 
 ## Modes
 
@@ -128,6 +209,11 @@ example.com {
 	}
 }
 ```
+
+`require` lets every `verified` request through, whichever agent signed it. To
+let only some agents through, set [`allowed_hosts`](#settings) in that
+`web_bot_auth`: requests from agents on other hosts then get `unverified` and
+the challenge.
 
 Blocked requests go through Caddy's error handling, so `handle_errors` can
 change the response, and the `{web_bot_auth.*}` placeholders are set there.
@@ -281,8 +367,8 @@ All `web_bot_auth` directives with the same `max_nonces`, in any site, share
 the nonces they remember, so a replay gets `replay` whichever of them checks
 it. That matters because a signature that covers only the host, not the path,
 verifies on every path of the site: in the `require` example under
-[Modes](#modes), a signed request to a path outside `/feed/`, replayed to
-`/feed/`, gets `replay`, and `require` blocks it. A request that several
+[Modes](#modes), a signed request with a nonce to a path outside `/feed/`,
+replayed to `/feed/`, gets `replay`, and `require` blocks it. A request that several
 directives check, such as a site-wide `web_bot_auth` and one inside a `handle`
 block, is not a replay of itself: each of them can verify it.
 
@@ -396,31 +482,57 @@ server that Caddy trusts as a proxy. Each `web_bot_auth` handler logs the
 warning at most once per config load, so several `web_bot_auth` directives, or
 one in a site on several ports, can each log it.
 
-## Access log
+## Logs
 
-Caddy's access log records request headers, including `Signature`. A
-signature can be replayed until it expires, so delete it from the access log:
+`web_bot_auth` logs each signed request at `debug`, with the message
+`checked signature` and the fields `outcome`, `reason`, `agent`, `keyid`,
+`label`, `signed` and `remote_ip`. It logs nothing for unsigned requests and
+never logs a `Signature` header value. The entry does not name the request's
+host or path; the [access log](#access-log) shows the outcome next to them.
+
+Caddy logs at `INFO` by default, so to see these entries, add a log for the
+module to the global options, the block that comes first in the Caddyfile.
+Like Caddy's other logs, it writes to stderr unless it sets an `output`:
 
 ```caddyfile
-log {
-	format filter {
-		request>headers>Signature delete
+{
+	log web_bot_auth {
+		level DEBUG
+		include http.handlers.web_bot_auth
 	}
+}
+```
+
+The warning that `web_bot_auth` logs for `insecure_transport` is described
+under [Caddy behind another HTTPS server](#caddy-behind-another-https-server).
+
+### Access log
+
+Caddy's access log records request headers, including `Signature`. A
+signature can be replayed until it expires, so delete it from the access log
+with a filter. To see each request's outcome there, add placeholders to its
+entries with `log_append`. Both go in the site block:
+
+```caddyfile
+example.com {
+	web_bot_auth
+
+	log {
+		format filter {
+			request>headers>Signature delete
+		}
+	}
+	log_append wba_outcome {web_bot_auth.outcome}
+	log_append wba_reason {web_bot_auth.reason}
+	log_append wba_agent {web_bot_auth.agent}
+
+	reverse_proxy app:8080
 }
 ```
 
 The filter covers only the access log. At `debug` level, Caddy's error log
 also records each request that `web_bot_auth` blocks, with its headers,
 including `Signature`.
-
-To see each request's outcome in the access log, add placeholders to its
-entries with `log_append`:
-
-```caddyfile
-log_append wba_outcome {web_bot_auth.outcome}
-log_append wba_reason {web_bot_auth.reason}
-log_append wba_agent {web_bot_auth.agent}
-```
 
 ## License
 
