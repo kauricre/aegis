@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,7 +94,9 @@ type Handler struct {
 	// failed.
 	MaxCacheEntries *int `json:"max_cache_entries,omitempty"`
 
-	// The most key directory downloads in flight at once, across all agents.
+	// The most key directory downloads in flight at once, across all agents,
+	// and the most lookups at once of agents whose key directory has not
+	// been downloaded.
 	MaxConcurrentFetches *int `json:"max_concurrent_fetches,omitempty"`
 
 	// The longest time from created to expires accepted in a signature.
@@ -144,9 +148,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	// A new fetcher or nonce store opens no connections and starts no
 	// goroutines, so the one LoadOrStore drops when it finds a stored one
 	// costs nothing to drop.
-	fetcher, _ := fetchers.LoadOrStore(h.fetcherKey, samesame.NewFetcher(fetcherOpts))
+	fetcher, _ := fetchers.LoadOrStore(h.fetcherKey, newKeyResolver(fetcherOpts))
 	nonceStore, _ := nonceStores.LoadOrStore(h.nonceStoreKey, samesame.NewMemoryNonceStore(nonceStoreSize))
-	verifierOpts.Resolver = fetcher.(*samesame.Fetcher)
+	verifierOpts.Resolver = fetcher.(*keyResolver)
 	verifierOpts.NonceStore = sharedNonceStore{nonceStore.(*samesame.MemoryNonceStore)}
 	verifierOpts.Scheme = clientScheme
 	if tweakVerifier != nil {
@@ -169,6 +173,135 @@ func (h *Handler) Cleanup() error {
 	_, _ = fetchers.Delete(h.fetcherKey)
 	_, _ = nonceStores.Delete(h.nonceStoreKey)
 	return nil
+}
+
+// keyResolver looks up key directories with samesame's fetcher and limits
+// the lookups that can start a download. samesame v1.0.0 downloads in a
+// goroutine that outlives the request and waits, with no time limit, for one
+// of max_concurrent_fetches download slots, so without the limit every
+// request that named a new agent while all slots were busy would leave such
+// a goroutine behind, also after its client disconnected.
+//
+// A lookup of an agent whose key directory samesame has returned goes
+// straight to samesame, as before. Any other lookup waits for one of
+// max_concurrent_fetches slots of its own, but only while a request waits
+// for it, and keeps the slot until samesame answers it, so at most that many
+// of these lookups are in samesame at once.
+type keyResolver struct {
+	fetcher *samesame.Fetcher
+	slots   chan struct{}
+
+	mu sync.Mutex
+	// The URLs of the key directories that samesame has returned, at most
+	// maxKnown of them. samesame keeps a directory until it evicts it to
+	// make room, also while downloads of it fail.
+	known    map[string]bool
+	maxKnown int
+	// The lookups of other key directories, by URL.
+	lookups map[string]*lookup
+}
+
+// lookup is one lookup of a key directory that samesame has not returned,
+// shared by the requests that wait for it.
+type lookup struct {
+	waiters   int           // the requests that wait for it
+	started   bool          // whether it has a slot and is in samesame
+	abandoned chan struct{} // closed when the last request leaves before it starts
+	done      chan struct{} // closed once dir and err are set
+	dir       *samesame.Directory
+	err       error
+}
+
+func newKeyResolver(opts samesame.FetcherOptions) *keyResolver {
+	// Provision runs before Validate rejects a negative limit, which, like
+	// zero, samesame replaces with its default.
+	slots, maxKnown := opts.MaxConcurrentFetches, opts.MaxCacheEntries
+	if slots <= 0 {
+		slots = samesame.DefaultMaxConcurrentFetches
+	}
+	if maxKnown <= 0 {
+		maxKnown = samesame.DefaultMaxCacheEntries
+	}
+	return &keyResolver{
+		fetcher:  samesame.NewFetcher(opts),
+		slots:    make(chan struct{}, slots),
+		known:    make(map[string]bool),
+		maxKnown: maxKnown,
+		lookups:  make(map[string]*lookup),
+	}
+}
+
+func (r *keyResolver) Resolve(ctx context.Context, identifier *url.URL) (*samesame.Directory, error) {
+	key := identifier.String()
+	r.mu.Lock()
+	if r.known[key] {
+		r.mu.Unlock()
+		// A download that samesame starts outlives the request and keeps
+		// the values of the context it gets, so it gets the request's
+		// cancellation without the request.
+		fctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer context.AfterFunc(ctx, cancel)()
+		return r.fetcher.Resolve(fctx, identifier)
+	}
+	l := r.lookups[key]
+	if l == nil {
+		l = &lookup{abandoned: make(chan struct{}), done: make(chan struct{})}
+		r.lookups[key] = l
+		go r.run(key, identifier, l)
+	}
+	l.waiters++
+	r.mu.Unlock()
+
+	select {
+	case <-l.done:
+		return l.dir, l.err
+	case <-ctx.Done():
+		r.mu.Lock()
+		l.waiters--
+		if l.waiters == 0 && !l.started {
+			delete(r.lookups, key)
+			close(l.abandoned)
+		}
+		r.mu.Unlock()
+		return nil, fmt.Errorf("%w: %w", samesame.ErrFetchFailed, ctx.Err())
+	}
+}
+
+// run hands l to samesame once it gets a slot, unless no request waits for
+// it by then.
+func (r *keyResolver) run(key string, identifier *url.URL, l *lookup) {
+	select {
+	case r.slots <- struct{}{}:
+	case <-l.abandoned:
+		return
+	}
+	r.mu.Lock()
+	if l.waiters == 0 {
+		// The last request left as the slot came free.
+		r.mu.Unlock()
+		<-r.slots
+		return
+	}
+	l.started = true
+	r.mu.Unlock()
+
+	l.dir, l.err = r.fetcher.Resolve(context.Background(), identifier)
+	<-r.slots
+
+	r.mu.Lock()
+	if l.err == nil {
+		if len(r.known) >= r.maxKnown {
+			for k := range r.known {
+				delete(r.known, k)
+				break
+			}
+		}
+		r.known[key] = true
+	}
+	delete(r.lookups, key)
+	r.mu.Unlock()
+	close(l.done)
 }
 
 // sharedNonceStore is a nonce store that handlers share. A request that passes
