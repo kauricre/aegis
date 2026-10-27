@@ -678,15 +678,17 @@ func TestMaxNonces(t *testing.T) {
 func TestIdentityHeader(t *testing.T) {
 	agent, other := newAgent(t), newAgent(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, "%q", r.Header.Values("Web-Bot-Auth-Agent"))
+		_, _ = fmt.Fprintf(w, "%q", slices.Concat(r.Header.Values("Web-Bot-Auth-Agent"), r.Header.Values("Web.Bot.Auth.Agent")))
 	}))
 	t.Cleanup(upstream.Close)
 	addr := upstream.Listener.Addr().String()
 
 	// The values of the header that the upstream receives from each kind of
-	// request. Every request also carries a copy of the header from the
-	// client, which claims to be the other agent.
-	verified, claimed, none := fmt.Sprintf("[%q]", agent.directory), fmt.Sprintf("[%q]", other.directory), "[]"
+	// request. Every request also carries two copies of the header from the
+	// client, which claim to be the other agent: one as Web-Bot-Auth-Agent,
+	// and one as Web.Bot.Auth.Agent, which PHP reads as the same header and
+	// which Caddy v2.11.4 passes upstream.
+	verified, claimed, none := fmt.Sprintf("[%q]", agent.directory), fmt.Sprintf("[%q %q]", other.directory, other.directory), "[]"
 	for _, tc := range []struct {
 		name, directives                        string
 		verified, invalid, unverified, unsigned string
@@ -724,6 +726,7 @@ func TestIdentityHeader(t *testing.T) {
 			} {
 				t.Run(req.name, func(t *testing.T) {
 					req.r.Header.Set("Web-Bot-Auth-Agent", other.directory)
+					req.r.Header.Set("Web.Bot.Auth.Agent", other.directory)
 					if got := s.send(t, req.r); got != req.want {
 						t.Errorf("upstream received %s, want %s", got, req.want)
 					}
