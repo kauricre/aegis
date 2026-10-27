@@ -15,11 +15,15 @@ section for that version. Merging the pull request tags the release.
 
 ### Changed
 
-- Aegis needs Caddy v2.11.4 or later, down from v2.11.7, so that caddyserver.com can list it; its package scanner rejects Caddy v2.11.5 and later. [#6](https://github.com/kauricre/aegis/pull/6)
-
 ### Deprecated
 
 ### Fixed
+
+## [0.1.1] - 2026-10-27
+
+### Changed
+
+- Aegis needs Caddy v2.11.4 or later, down from v2.11.7, so that caddyserver.com can list it; its package scanner rejects Caddy v2.11.5 and later. [#6](https://github.com/kauricre/aegis/pull/6)
 
 ## [0.1.0] - 2026-10-25
 
