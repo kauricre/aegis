@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -213,6 +214,38 @@ func (s site) logs(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// accessLog returns a log directive that writes the site's access log to a
+// file, in the format the README shows, and the name of that file.
+func accessLog(t *testing.T) (directive, file string) {
+	t.Helper()
+	file = filepath.Join(t.TempDir(), "access.log")
+	return `
+	log {
+		output file ` + file + `
+		format filter {
+			request>headers>Signature delete
+		}
+	}`, file
+}
+
+// accessLogEntries returns the lines of the access log in file, each as written
+// and decoded from JSON.
+func accessLogEntries(t *testing.T, file string) (lines []string, entries []map[string]any) {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.Lines(string(b)) {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		lines, entries = append(lines, line), append(entries, entry)
+	}
+	return lines, entries
 }
 
 func get(t *testing.T, url string) *http.Request {

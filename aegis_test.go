@@ -385,6 +385,123 @@ func TestLogsSignedRequestsAtDebug(t *testing.T) {
 	}
 }
 
+// accessLogObject returns the web_bot_auth object that the access log carries
+// for a request that got outcome, signed and reason, with agent, keyID and
+// label.
+func accessLogObject(outcome string, signed bool, reason, agent, keyID, label string) map[string]any {
+	return map[string]any{"outcome": outcome, "signed": signed, "reason": reason, "agent": agent, "keyid": keyID, "label": label}
+}
+
+func TestAccessLog(t *testing.T) {
+	agent, other := newAgent(t), newAgent(t)
+	// Each mode logs the same object for each kind of request, also for the
+	// requests it blocks.
+	for _, mode := range []string{"observe", "enforce", "require"} {
+		t.Run(mode, func(t *testing.T) {
+			log, file := accessLog(t)
+			s := serve(t, `
+	web_bot_auth {
+		mode `+mode+`
+	}
+	respond "next handler"`+log)
+
+			for _, r := range []*http.Request{
+				sign(t, agent, get(t, s.url)),
+				tamper(sign(t, agent, get(t, s.url))),
+				claim(sign(t, agent, get(t, s.url)), other),
+				get(t, s.url),
+			} {
+				s.do(t, r)
+			}
+
+			_, entries := accessLogEntries(t, file)
+			var got []any
+			for _, entry := range entries {
+				got = append(got, entry["web_bot_auth"])
+			}
+			want := []any{
+				accessLogObject("verified", true, "", agent.directory, agent.KeyID(), "sig1"),
+				accessLogObject("invalid", true, "bad_signature", "", "", ""),
+				accessLogObject("unverified", true, "key_unknown", "", "", ""),
+				accessLogObject("unverified", false, "no_signature", "", "", ""),
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("web_bot_auth objects = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestAccessLogWhenUpstreamBreaksResponse checks the access log line of a
+// request for which reverse_proxy panics with http.ErrAbortHandler, as it does
+// when the upstream or the client breaks off the response body.
+func TestAccessLogWhenUpstreamBreaksResponse(t *testing.T) {
+	agent := newAgent(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		_, _ = io.WriteString(w, "part")
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	t.Cleanup(upstream.Close)
+	// log_append adds its field after the handlers it wraps return, so a line
+	// without that field shows that reverse_proxy panicked.
+	log, file := accessLog(t)
+	s := serve(t, `
+	log_append wrapped_outcome {web_bot_auth.outcome}
+	web_bot_auth
+	reverse_proxy `+upstream.Listener.Addr().String()+log)
+
+	// The client gets a broken response, for which s.do would fail the test.
+	_, pool := localTLS()
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig:   &tls.Config{RootCAs: pool},
+		DisableKeepAlives: true,
+	}}
+	if resp, err := client.Do(sign(t, agent, get(t, s.url))); err == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	_, entries := accessLogEntries(t, file)
+	if len(entries) != 1 {
+		t.Fatalf("access log has %d lines, want 1", len(entries))
+	}
+	if _, ok := entries[0]["wrapped_outcome"]; ok {
+		t.Fatal("log_append's field is in the access log line, so reverse_proxy did not panic")
+	}
+	want := accessLogObject("verified", true, "", agent.directory, agent.KeyID(), "sig1")
+	if got := entries[0]["web_bot_auth"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("web_bot_auth object = %v, want %v", got, want)
+	}
+}
+
+func TestAccessLogOfTwoDirectives(t *testing.T) {
+	agent := newAgent(t)
+	// The first directive gets invalid and passes the request on to the
+	// second, which gets verified.
+	log, file := accessLog(t)
+	s := serve(t, `
+	web_bot_auth {
+		max_validity 30m
+	}
+	web_bot_auth
+	respond "next handler"`+log)
+	s.send(t, sign(t, agent, get(t, s.url)))
+
+	lines, entries := accessLogEntries(t, file)
+	if len(lines) != 1 {
+		t.Fatalf("access log has %d lines, want 1", len(lines))
+	}
+	if n := strings.Count(lines[0], `"web_bot_auth":`); n != 1 {
+		t.Errorf("access log line has %d web_bot_auth objects, want 1", n)
+	}
+	want := accessLogObject("verified", true, "", agent.directory, agent.KeyID(), "sig1")
+	if got := entries[0]["web_bot_auth"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("web_bot_auth object = %v, want %v", got, want)
+	}
+}
+
 func TestSettingsReachSamesame(t *testing.T) {
 	for _, tc := range []struct {
 		name, settings, json string
