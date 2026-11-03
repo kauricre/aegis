@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -34,6 +35,8 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 //		clock_skew             <duration>
 //		max_signatures         <n>
 //		max_nonces             <n>
+//		nonce_store            <name> { ... }
+//		nonce_store_timeout    <duration>
 //	}
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume directive name
@@ -81,6 +84,19 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			h.MaxSignatures, err = arg(d, strconv.Atoi)
 		case "max_nonces":
 			h.MaxNonces, err = arg(d, strconv.Atoi)
+		case "nonce_store":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			name := d.Val()
+			var unm caddyfile.Unmarshaler
+			unm, err = caddyfile.UnmarshalModule(d, "http.web_bot_auth.nonce_stores."+name)
+			if err != nil {
+				return err
+			}
+			h.NonceStoreRaw = caddyconfig.JSONModuleObject(unm, "store", name, nil)
+		case "nonce_store_timeout":
+			h.NonceStoreTimeout, err = arg(d, parseDuration)
 		default:
 			return d.Errf("unrecognized subdirective %q", d.Val())
 		}

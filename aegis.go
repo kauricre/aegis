@@ -5,6 +5,7 @@ package aegis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,9 +53,10 @@ var fetchers, nonceStores = caddy.NewUsagePool(), caddy.NewUsagePool()
 // header, and any other absent setting keeps samesame's default.
 //
 // Handlers with the same key discovery settings share one cache of key
-// directories, and handlers with the same max_nonces share the nonces they
-// remember, also across config reloads. An absent setting counts as different
-// from one set to samesame's default.
+// directories, and handlers without nonce_store and with the same max_nonces
+// share the nonces they remember, also across config reloads. Handlers whose nonce_store modules
+// return the same NonceStoreKey share nonces too. An absent setting counts as
+// different from one set to samesame's default.
 type Handler struct {
 	// Which requests are blocked: observe, the default, blocks none; enforce
 	// blocks invalid requests, with the status code samesame suggests; require
@@ -116,12 +118,26 @@ type Handler struct {
 	// agents.
 	MaxNonces *int `json:"max_nonces,omitempty"`
 
+	// The module that keeps the nonces in place of this instance's memory, so
+	// that several Caddy instances can share them. When unset, the nonces are
+	// kept in memory.
+	NonceStoreRaw json.RawMessage `json:"nonce_store,omitempty" caddy:"namespace=http.web_bot_auth.nonce_stores inline_key=store"`
+
+	// How long one nonce_store check may take. Needs nonce_store.
+	NonceStoreTimeout *caddy.Duration `json:"nonce_store_timeout,omitempty"`
+
 	verifier *samesame.Verifier
 	logger   *zap.Logger
 
-	// The handler's keys in fetchers and nonceStores.
+	// The handler's keys in fetchers and nonceStores. Only a handler without
+	// nonce_store takes an entry of nonceStores.
 	fetcherKey    string
 	nonceStoreKey int
+	memoryNonces  bool
+
+	// The loaded nonce_store module. Caddy clears NonceStoreRaw once it has
+	// loaded the module, before Validate runs.
+	nonceStore NonceStore
 
 	// Whether the handler has logged its warning about insecure_transport.
 	// Each config load makes new handlers, so each load can warn again.
@@ -152,9 +168,24 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	// goroutines, so the one LoadOrStore drops when it finds a stored one
 	// costs nothing to drop.
 	fetcher, _ := fetchers.LoadOrStore(h.fetcherKey, newKeyResolver(fetcherOpts))
-	nonceStore, _ := nonceStores.LoadOrStore(h.nonceStoreKey, samesame.NewMemoryNonceStore(nonceStoreSize))
 	verifierOpts.Resolver = fetcher.(*keyResolver)
-	verifierOpts.NonceStore = sharedNonceStore{nonceStore.(*samesame.MemoryNonceStore)}
+	if h.NonceStoreRaw == nil {
+		nonceStore, _ := nonceStores.LoadOrStore(h.nonceStoreKey, samesame.NewMemoryNonceStore(nonceStoreSize))
+		h.memoryNonces = true
+		memory := nonceStore.(*samesame.MemoryNonceStore)
+		verifierOpts.NonceStore = sharedNonceStore{memory, memory}
+	} else {
+		mod, err := ctx.LoadModule(h, "NonceStoreRaw")
+		if err != nil {
+			return err
+		}
+		store, ok := mod.(NonceStore)
+		if !ok {
+			return fmt.Errorf("nonce_store module %T does not implement aegis.NonceStore", mod)
+		}
+		h.nonceStore = store
+		verifierOpts.NonceStore = sharedNonceStore{store.NonceStoreKey(), store}
+	}
 	verifierOpts.Scheme = clientScheme
 	if tweakVerifier != nil {
 		tweakVerifier(&verifierOpts)
@@ -167,14 +198,17 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// Cleanup releases the handler's key cache and nonce store. Caddy calls it
-// once for each handler whose Provision ran, also when Provision or Validate
-// fails, and Provision takes both before anything can fail.
+// Cleanup releases the handler's key cache and in-memory nonce store. Caddy
+// calls it once for each handler whose Provision ran, also when Provision or
+// Validate fails, and Provision takes the key cache first and the nonce store
+// right after, with nothing that can fail in between.
 func (h *Handler) Cleanup() error {
 	// Delete returns only the errors of a Destruct method, which neither
 	// value has.
 	_, _ = fetchers.Delete(h.fetcherKey)
-	_, _ = nonceStores.Delete(h.nonceStoreKey)
+	if h.memoryNonces {
+		_, _ = nonceStores.Delete(h.nonceStoreKey)
+	}
 	return nil
 }
 
@@ -311,13 +345,19 @@ func (r *keyResolver) run(key string, identifier *url.URL, l *lookup) {
 // several of them is checked by each, and the first check records its nonces,
 // so at the later checks they count as fresh for that request only; any other
 // request with one of them is still a replay.
-type sharedNonceStore struct{ store *samesame.MemoryNonceStore }
+//
+// id tells stores apart. It is the *samesame.MemoryNonceStore for memory and
+// the NonceStoreKey for a nonce_store module.
+type sharedNonceStore struct {
+	id    any
+	store samesame.NonceStore
+}
 
 // recordedNonce is a nonce that a request recorded in a store. The store is
 // part of it because a request can also pass a handler with another store,
 // which must still record the nonce to catch replays sent to that handler.
 type recordedNonce struct {
-	store        *samesame.MemoryNonceStore
+	store        any
 	scope, nonce string
 }
 
@@ -326,13 +366,13 @@ type recordedNonce struct {
 const recordedNoncesVar = "web_bot_auth.recorded_nonces"
 
 func (s sharedNonceStore) CheckAndRecord(ctx context.Context, scope, nonce string, until time.Time) (bool, error) {
-	key := recordedNonce{s.store, scope, nonce}
+	key := recordedNonce{s.id, scope, nonce}
 	recorded, _ := caddyhttp.GetVar(ctx, recordedNoncesVar).(map[recordedNonce]bool)
 	if recorded[key] {
 		return true, nil
 	}
 	fresh, err := s.store.CheckAndRecord(ctx, scope, nonce, until)
-	if fresh {
+	if fresh && err == nil {
 		if recorded == nil {
 			recorded = make(map[recordedNonce]bool)
 			caddyhttp.SetVar(ctx, recordedNoncesVar, recorded)
@@ -423,8 +463,16 @@ func (h *Handler) Validate() error {
 		checkPositive("clock_skew", h.ClockSkew),
 		checkPositive("max_signatures", h.MaxSignatures),
 		checkPositive("max_nonces", h.MaxNonces),
+		checkPositive("nonce_store_timeout", h.NonceStoreTimeout),
 	); err != nil {
 		return err
+	}
+	hasStore := h.NonceStoreRaw != nil || h.nonceStore != nil
+	if hasStore && h.MaxNonces != nil {
+		return errors.New("max_nonces sizes the in-memory nonce store and does not apply with nonce_store")
+	}
+	if !hasStore && h.NonceStoreTimeout != nil {
+		return errors.New("nonce_store_timeout needs nonce_store")
 	}
 
 	minTTL, minName := samesame.DefaultMinTTL, "samesame's default min_ttl"
