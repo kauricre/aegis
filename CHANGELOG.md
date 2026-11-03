@@ -13,6 +13,8 @@ section for that version. Merging the pull request tags the release.
 
 ### Added
 
+- Each request's entry in Caddy's access log carries a `web_bot_auth` object with `outcome`, `signed`, `reason`, `agent`, `keyid` and `label`, also when the client breaks off the response, which drops the fields that `log_append` adds; read `web_bot_auth.*` instead of the README's former `wba_*` fields and delete their `log_append` lines.
+
 ### Changed
 
 ### Deprecated
