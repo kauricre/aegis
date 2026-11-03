@@ -157,7 +157,7 @@ To route one agent, match the full URL of its key directory:
 ```
 
 To find an agent's URL, read the `agent` field of the module's log entries for
-its verified requests, or `{web_bot_auth.agent}` in the access log; see
+its verified requests, or `web_bot_auth.agent` in the access log; see
 [Logs](#logs).
 
 Directives that run before `web_bot_auth`, and their matchers, cannot use the
@@ -516,10 +516,17 @@ under [Caddy behind another HTTPS server](#caddy-behind-another-https-server).
 
 ### Access log
 
-Caddy's access log records request headers, including `Signature`. A
+`web_bot_auth` adds a `web_bot_auth` object to each request's entry in Caddy's
+access log. It holds the fields `outcome`, `signed`, `reason`, `agent`, `keyid`
+and `label`, with the values of the [placeholders](#placeholders) of the same
+names, so `web_bot_auth.outcome` in the access log is `{web_bot_auth.outcome}`.
+Every entry carries all six fields, also the entry of a request whose client
+breaks off the response. A request that passes several `web_bot_auth`
+directives carries the object of the last one.
+
+The access log also records request headers, including `Signature`. A
 signature can be replayed until it expires, so delete it from the access log
-with a filter. To see each request's outcome there, add placeholders to its
-entries with `log_append`. Both go in the site block:
+with a filter in the site block:
 
 ```caddyfile
 example.com {
@@ -530,9 +537,6 @@ example.com {
 			request>headers>Signature delete
 		}
 	}
-	log_append wba_outcome {web_bot_auth.outcome}
-	log_append wba_reason {web_bot_auth.reason}
-	log_append wba_agent {web_bot_auth.agent}
 
 	reverse_proxy app:8080
 }

@@ -22,7 +22,4 @@ example.com {
 			request>headers>Signature delete
 		}
 	}
-	log_append wba_outcome {web_bot_auth.outcome}
-	log_append wba_reason {web_bot_auth.reason}
-	log_append wba_agent {web_bot_auth.agent}
 }
