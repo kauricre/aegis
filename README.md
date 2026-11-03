@@ -157,7 +157,7 @@ To route one agent, match the full URL of its key directory:
 ```
 
 To find an agent's URL, read the `agent` field of the module's log entries for
-its verified requests, or `{web_bot_auth.agent}` in the access log; see
+its verified requests, or `web_bot_auth.agent` in the access log; see
 [Logs](#logs).
 
 Directives that run before `web_bot_auth`, and their matchers, cannot use the
@@ -440,6 +440,7 @@ this.
 {
 	servers {
 		trusted_proxies static 10.0.0.5
+		trusted_proxies_strict
 	}
 }
 
@@ -463,16 +464,27 @@ client IP also trust headers from the peers it holds. In turn, each of those
 peers can make a signature sent over plain HTTP count as HTTPS, so each must set
 `X-Forwarded-Proto` itself, replacing any value from the client.
 
+Set `trusted_proxies_strict` beside `trusted_proxies`, for the client IP.
+Without it, Caddy takes the leftmost address in `X-Forwarded-For`, which the
+client controls: a client that sends `X-Forwarded-For: 127.0.0.1` is logged as
+`127.0.0.1`. With it, Caddy reads the header from the right and takes the first
+address that `trusted_proxies` does not hold. That address is the client's only
+when each front server adds the address of its own peer at the end of
+`X-Forwarded-For`, or replaces the header: a front server that passes the
+client's header on unchanged leaves the client's own value at the end. The
+option changes only the client IP, not how `web_bot_auth` reads
+`X-Forwarded-Proto`.
+
 ### Front server config
 
 | Front server | Re-encryption or TLS passthrough | Plain HTTP to Caddy |
 |---|---|---|
-| nginx | `proxy_pass https://<caddy>;` with `proxy_set_header Host $host;`, `proxy_ssl_server_name on;` and `proxy_ssl_name $host;`. Passthrough: the `stream` module with `ssl_preread on;` | `proxy_pass http://<caddy>;` with no path after the address, `proxy_set_header Host $host;` and `proxy_set_header X-Forwarded-Proto $scheme;` |
-| HAProxy | `ssl` on the `server` line; HAProxy 3.4 sends the request's host as SNI by default. Passthrough: `mode tcp`, routing on `req.ssl_sni` | `http-request set-header X-Forwarded-Proto %[ssl_fc,iif(https,http)]`, not `add-header X-Forwarded-Proto https if { ssl_fc }`, which keeps a client's own value on plain-HTTP listeners |
-| Traefik | Passthrough: a TCP router with `tls.passthrough: true` | Nothing: by default, Traefik sets `X-Forwarded-Proto` and removes the client's value |
+| nginx | `proxy_pass https://<caddy>;` with `proxy_set_header Host $host;`, `proxy_ssl_server_name on;` and `proxy_ssl_name $host;`. Passthrough: the `stream` module with `ssl_preread on;` | `proxy_pass http://<caddy>;` with no path after the address, `proxy_set_header Host $host;`, `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` |
+| HAProxy | `ssl` on the `server` line; HAProxy 3.4 sends the request's host as SNI by default. Passthrough: `mode tcp`, routing on `req.ssl_sni` | `http-request set-header X-Forwarded-Proto %[ssl_fc,iif(https,http)]`, not `add-header X-Forwarded-Proto https if { ssl_fc }`, which keeps a client's own value on plain-HTTP listeners; and `option forwardfor`, not `option forwardfor if-none`, which keeps a client's own `X-Forwarded-For` |
+| Traefik | Passthrough: a TCP router with `tls.passthrough: true` | Nothing: by default, Traefik sets `X-Forwarded-Proto` and `X-Forwarded-For` and removes the client's values |
 | Cloudflare | SSL/TLS encryption mode "Full (strict)" | Not "Flexible": see below |
-| Cloudflare Tunnel | An `https://` service with `matchSNItoHost: true` under `originRequest` | An `http://127.0.0.1:<port>` service, with `trusted_proxies static 127.0.0.1/32`. Do not set `httpHostHeader` |
-| Tailscale Funnel | `tailscale funnel --tcp=443 tcp://localhost:<port>` | `tailscale funnel <port>`, which sets `X-Forwarded-Proto: https`, with `trusted_proxies static 127.0.0.1/32`. Avoid Unix socket targets, which get `Host: localhost`, and `--set-path`, which changes the path |
+| Cloudflare Tunnel | An `https://` service with `matchSNItoHost: true` under `originRequest` | An `http://127.0.0.1:<port>` service, with `trusted_proxies static 127.0.0.1/32` and `trusted_proxies_strict`; Cloudflare adds the client's address at the end of `X-Forwarded-For`. Do not set `httpHostHeader` |
+| Tailscale Funnel | `tailscale funnel --tcp=443 tcp://localhost:<port>` | `tailscale funnel <port>`, which sets `X-Forwarded-Proto: https` and replaces `X-Forwarded-For`, with `trusted_proxies static 127.0.0.1/32` and `trusted_proxies_strict`. Avoid Unix socket targets, which get `Host: localhost`, and `--set-path`, which changes the path |
 
 Some front server setups break signatures or expose them:
 
@@ -516,10 +528,17 @@ under [Caddy behind another HTTPS server](#caddy-behind-another-https-server).
 
 ### Access log
 
-Caddy's access log records request headers, including `Signature`. A
+`web_bot_auth` adds a `web_bot_auth` object to each request's entry in Caddy's
+access log. It holds the fields `outcome`, `signed`, `reason`, `agent`, `keyid`
+and `label`, with the values of the [placeholders](#placeholders) of the same
+names, so `web_bot_auth.outcome` in the access log is `{web_bot_auth.outcome}`.
+Every entry carries all six fields, also the entry of a request whose client
+breaks off the response. A request that passes several `web_bot_auth`
+directives carries the object of the last one.
+
+The access log also records request headers, including `Signature`. A
 signature can be replayed until it expires, so delete it from the access log
-with a filter. To see each request's outcome there, add placeholders to its
-entries with `log_append`. Both go in the site block:
+with a filter in the site block:
 
 ```caddyfile
 example.com {
@@ -530,9 +549,6 @@ example.com {
 			request>headers>Signature delete
 		}
 	}
-	log_append wba_outcome {web_bot_auth.outcome}
-	log_append wba_reason {web_bot_auth.reason}
-	log_append wba_agent {web_bot_auth.agent}
 
 	reverse_proxy app:8080
 }

@@ -45,8 +45,9 @@ var tweakVerifier func(*samesame.VerifierOptions)
 var fetchers, nonceStores = caddy.NewUsagePool(), caddy.NewUsagePool()
 
 // Handler checks the Web Bot Auth signature of each request with samesame,
-// writes the outcome and its details to the {web_bot_auth.*} placeholders, and
-// passes the request on unless the mode blocks it. Every setting is optional:
+// writes the outcome and its details to the {web_bot_auth.*} placeholders and
+// to a web_bot_auth object in the request's access log line, and passes the
+// request on unless the mode blocks it. Every setting is optional:
 // an absent mode is observe, an absent identity_header removes and sets no
 // header, and any other absent setting keeps samesame's default.
 //
@@ -495,6 +496,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	repl.Set("web_bot_auth.agent", agent)
 	repl.Set("web_bot_auth.keyid", keyID)
 	repl.Set("web_bot_auth.label", label)
+
+	// The access log line gets this object even when a later handler panics,
+	// as reverse_proxy does when the client breaks off the response. Such a
+	// panic skips the fields that log_append adds after the handlers it wraps
+	// return. Set replaces the object of an earlier web_bot_auth handler, so
+	// the line carries one.
+	extra := r.Context().Value(caddyhttp.ExtraLogFieldsCtxKey).(*caddyhttp.ExtraLogFields)
+	extra.Set(zap.Dict("web_bot_auth",
+		zap.String("outcome", outcome),
+		zap.Bool("signed", signed),
+		zap.String("reason", reason),
+		zap.String("agent", agent),
+		zap.String("keyid", keyID),
+		zap.String("label", label),
+	))
 
 	// Unsigned requests are most traffic, so only signed ones are logged.
 	if signed {
