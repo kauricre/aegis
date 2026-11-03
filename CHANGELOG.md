@@ -21,6 +21,8 @@ section for that version. Merging the pull request tags the release.
 
 ### Fixed
 
+- The README's plain-HTTP front server setups and `examples/front-server.caddyfile` set `trusted_proxies_strict` beside `trusted_proxies`, so Caddy's client IP is no longer the leftmost `X-Forwarded-For` address, which the client chooses.
+
 ## [0.1.1] - 2026-10-27
 
 ### Changed
