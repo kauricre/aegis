@@ -21,7 +21,7 @@ section for that version. Merging the pull request tags the release.
 
 ### Fixed
 
-- The README's plain-HTTP front server setups and `examples/front-server.caddyfile` set `trusted_proxies_strict` beside `trusted_proxies`, so Caddy's client IP is no longer the leftmost `X-Forwarded-For` address, which the client chooses. [#8](https://github.com/kauricre/aegis/pull/8)
+- The README's plain-HTTP front server setups and `examples/front-server.caddyfile` set `trusted_proxies_strict` beside `trusted_proxies`, and the nginx and HAProxy setups add the client's address at the end of `X-Forwarded-For`, so Caddy's client IP is no longer an address the client chooses. [#8](https://github.com/kauricre/aegis/pull/8)
 
 ## [0.1.1] - 2026-10-27
 
