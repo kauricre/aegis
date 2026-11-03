@@ -440,6 +440,7 @@ this.
 {
 	servers {
 		trusted_proxies static 10.0.0.5
+		trusted_proxies_strict
 	}
 }
 
@@ -463,6 +464,13 @@ client IP also trust headers from the peers it holds. In turn, each of those
 peers can make a signature sent over plain HTTP count as HTTPS, so each must set
 `X-Forwarded-Proto` itself, replacing any value from the client.
 
+Set `trusted_proxies_strict` beside `trusted_proxies`, for the client IP.
+Without it, Caddy takes the leftmost address in `X-Forwarded-For`, which the
+client controls: a client that sends `X-Forwarded-For: 127.0.0.1` is logged as
+`127.0.0.1`. With it, Caddy reads the header from the right and takes the first
+address that `trusted_proxies` does not hold. The option changes only the
+client IP, not how `web_bot_auth` reads `X-Forwarded-Proto`.
+
 ### Front server config
 
 | Front server | Re-encryption or TLS passthrough | Plain HTTP to Caddy |
@@ -471,8 +479,8 @@ peers can make a signature sent over plain HTTP count as HTTPS, so each must set
 | HAProxy | `ssl` on the `server` line; HAProxy 3.4 sends the request's host as SNI by default. Passthrough: `mode tcp`, routing on `req.ssl_sni` | `http-request set-header X-Forwarded-Proto %[ssl_fc,iif(https,http)]`, not `add-header X-Forwarded-Proto https if { ssl_fc }`, which keeps a client's own value on plain-HTTP listeners |
 | Traefik | Passthrough: a TCP router with `tls.passthrough: true` | Nothing: by default, Traefik sets `X-Forwarded-Proto` and removes the client's value |
 | Cloudflare | SSL/TLS encryption mode "Full (strict)" | Not "Flexible": see below |
-| Cloudflare Tunnel | An `https://` service with `matchSNItoHost: true` under `originRequest` | An `http://127.0.0.1:<port>` service, with `trusted_proxies static 127.0.0.1/32`. Do not set `httpHostHeader` |
-| Tailscale Funnel | `tailscale funnel --tcp=443 tcp://localhost:<port>` | `tailscale funnel <port>`, which sets `X-Forwarded-Proto: https`, with `trusted_proxies static 127.0.0.1/32`. Avoid Unix socket targets, which get `Host: localhost`, and `--set-path`, which changes the path |
+| Cloudflare Tunnel | An `https://` service with `matchSNItoHost: true` under `originRequest` | An `http://127.0.0.1:<port>` service, with `trusted_proxies static 127.0.0.1/32` and `trusted_proxies_strict`. Do not set `httpHostHeader` |
+| Tailscale Funnel | `tailscale funnel --tcp=443 tcp://localhost:<port>` | `tailscale funnel <port>`, which sets `X-Forwarded-Proto: https`, with `trusted_proxies static 127.0.0.1/32` and `trusted_proxies_strict`. Avoid Unix socket targets, which get `Host: localhost`, and `--set-path`, which changes the path |
 
 Some front server setups break signatures or expose them:
 
