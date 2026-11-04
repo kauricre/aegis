@@ -54,9 +54,9 @@ var fetchers, nonceStores = caddy.NewUsagePool(), caddy.NewUsagePool()
 //
 // Handlers with the same key discovery settings share one cache of key
 // directories, and handlers without nonce_store and with the same max_nonces
-// share the nonces they remember, also across config reloads. Handlers whose nonce_store modules
-// return the same NonceStoreKey share nonces too. An absent setting counts as
-// different from one set to samesame's default.
+// share the nonces they remember, also across config reloads. Handlers whose
+// nonce_store modules return the same NonceStoreKey share nonces too. An
+// absent setting counts as different from one set to samesame's default.
 type Handler struct {
 	// Which requests are blocked: observe, the default, blocks none; enforce
 	// blocks invalid requests, with the status code samesame suggests; require
@@ -129,11 +129,13 @@ type Handler struct {
 	verifier *samesame.Verifier
 	logger   *zap.Logger
 
-	// The handler's keys in fetchers and nonceStores. Only a handler without
-	// nonce_store takes an entry of nonceStores.
-	fetcherKey    string
-	nonceStoreKey int
-	memoryNonces  bool
+	// The handler's keys in fetchers, nonceStores and storeHealths. Only a
+	// handler without nonce_store takes an entry of nonceStores, and only one
+	// with nonce_store takes an entry of storeHealths.
+	fetcherKey     string
+	nonceStoreKey  int
+	memoryNonces   bool
+	storeHealthKey string
 
 	// The loaded nonce_store module. Caddy clears NonceStoreRaw once it has
 	// loaded the module, before Validate runs.
@@ -183,8 +185,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if !ok {
 			return fmt.Errorf("nonce_store module %T does not implement aegis.NonceStore", mod)
 		}
-		h.nonceStore = store
-		verifierOpts.NonceStore = sharedNonceStore{store.NonceStoreKey(), store}
+		h.nonceStore, h.storeHealthKey = store, store.NonceStoreKey()
+		health, _ := storeHealths.LoadOrStore(h.storeHealthKey, new(storeHealth))
+		timeout := defaultNonceStoreTimeout
+		if h.NonceStoreTimeout != nil {
+			timeout = time.Duration(*h.NonceStoreTimeout)
+		}
+		verifierOpts.NonceStore = sharedNonceStore{h.storeHealthKey, guardedStore{store, h.storeHealthKey, health.(*storeHealth), timeout, h.logger}}
 	}
 	verifierOpts.Scheme = clientScheme
 	if tweakVerifier != nil {
@@ -198,16 +205,20 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// Cleanup releases the handler's key cache and in-memory nonce store. Caddy
-// calls it once for each handler whose Provision ran, also when Provision or
-// Validate fails, and Provision takes the key cache first and the nonce store
-// right after, with nothing that can fail in between.
+// Cleanup releases the handler's key cache, and its in-memory nonce store or
+// its entry of storeHealths. Caddy calls it once for each handler whose
+// Provision ran, also when Provision or Validate fails. Provision takes the
+// key cache before anything that can fail, and sets memoryNonces or nonceStore
+// where it takes the other entry, with nothing that can fail in between.
 func (h *Handler) Cleanup() error {
-	// Delete returns only the errors of a Destruct method, which neither
-	// value has.
+	// Delete returns only the errors of a Destruct method, which no value
+	// has.
 	_, _ = fetchers.Delete(h.fetcherKey)
 	if h.memoryNonces {
 		_, _ = nonceStores.Delete(h.nonceStoreKey)
+	}
+	if h.nonceStore != nil {
+		_, _ = storeHealths.Delete(h.storeHealthKey)
 	}
 	return nil
 }
