@@ -14,6 +14,7 @@ section for that version. Merging the pull request tags the release.
 ### Added
 
 - Each request's entry in Caddy's access log carries a `web_bot_auth` object with `outcome`, `signed`, `reason`, `agent`, `keyid` and `label`, also when the client breaks off the response, which drops the fields that `log_append` adds; read `web_bot_auth.*` instead of the README's former `wba_*` fields and delete their `log_append` lines. [#8](https://github.com/kauricre/aegis/pull/8)
+- `nonce_store` keeps the nonces in a module of the new `http.web_bot_auth.nonce_stores` namespace, which several Caddy instances can share, so a replay gets `replay` on any of them; `nonce_store_timeout`, `250ms` by default, limits each check, and while the store fails, correctly signed requests with a nonce get `unverified` with reason `nonce_store`.
 
 ### Changed
 
