@@ -26,6 +26,10 @@ func TestCaddyfile(t *testing.T) {
 		{"a duration that does not parse", "web_bot_auth {\n\t\tfetch_timeout soon\n\t}", true},
 		{"a size that does not parse", "web_bot_auth {\n\t\tmax_directory_size big\n\t}", true},
 		{"a count that does not parse", "web_bot_auth {\n\t\tmax_signatures many\n\t}", true},
+		{"nonce_store without a name", "web_bot_auth {\n\t\tnonce_store\n\t}", true},
+		{"nonce_store with an unknown module", "web_bot_auth {\n\t\tnonce_store nosuch\n\t}", true},
+		{"nonce_store with a module", "web_bot_auth {\n\t\tnonce_store test {\n\t\t\tname a\n\t\t}\n\t}", false},
+		{"nonce_store_timeout without a value", "web_bot_auth {\n\t\tnonce_store_timeout\n\t}", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caddyfile := "example.com {\n\t" + tc.directive + "\n}\n"

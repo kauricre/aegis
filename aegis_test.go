@@ -641,6 +641,11 @@ func TestValidate(t *testing.T) {
 		row{`{"min_ttl":"2d"}`, "min_ttl 48h0m0s is greater than samesame's default max_ttl 24h0m0s"},
 		row{`{"max_ttl":"1m"}`, ""},
 		row{`{"max_ttl":"30s"}`, "samesame's default min_ttl 1m0s is greater than max_ttl 30s"},
+		row{`{"nonce_store":{"store":"test"},"nonce_store_timeout":0}`, "nonce_store_timeout must be positive"},
+		row{`{"nonce_store":{"store":"test"},"nonce_store_timeout":-1}`, "nonce_store_timeout must be positive"},
+		row{`{"nonce_store":{"store":"test"},"nonce_store_timeout":"1s"}`, ""},
+		row{`{"nonce_store":{"store":"test"},"max_nonces":5}`, "max_nonces sizes the in-memory nonce store and does not apply with nonce_store"},
+		row{`{"nonce_store_timeout":"1s"}`, "nonce_store_timeout needs nonce_store"},
 	)
 
 	for _, tc := range rows {
@@ -665,6 +670,7 @@ func TestInvalidSettingFailsConfigLoad(t *testing.T) {
 		{"fetch_timeout 0", "fetch_timeout must be positive"},
 		{"max_concurrent_fetches -1", "max_concurrent_fetches must be positive"},
 		{"mode block", `mode must be observe, enforce or require, not "block"`},
+		{"nonce_store test {\n\t\t\tname a\n\t\t}\n\t\tmax_nonces 5", "max_nonces sizes the in-memory nonce store and does not apply with nonce_store"},
 	} {
 		t.Run(tc.setting, func(t *testing.T) {
 			adapted, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(`{

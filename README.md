@@ -265,11 +265,12 @@ header.
 
 ## Settings
 
-Every setting is optional. `mode` is described in [Modes](#modes) and
-`identity_header` in [Identity header](#identity-header). The others
-go to [samesame](https://github.com/TecharoHQ/samesame), the library that
-checks the signatures: an absent one keeps samesame's default, and Aegis sets
-no defaults of its own.
+Every setting is optional. `mode` is described in [Modes](#modes),
+`identity_header` in [Identity header](#identity-header), and `nonce_store`
+and `nonce_store_timeout` in [Shared nonce store](#shared-nonce-store).
+`nonce_store_timeout` is applied by Aegis, with a default of its own, `250ms`.
+The others go to [samesame](https://github.com/TecharoHQ/samesame), the library
+that checks the signatures, and an absent one keeps samesame's default.
 
 ```caddyfile
 web_bot_auth {
@@ -288,6 +289,8 @@ web_bot_auth {
 	clock_skew             <duration>
 	max_signatures         <n>
 	max_nonces             <n>
+	nonce_store            <name> { ... }
+	nonce_store_timeout    <duration>
 }
 ```
 
@@ -305,12 +308,16 @@ web_bot_auth {
 | `clock_skew` | the tolerance applied to `created` and `expires` | `1m` |
 | `max_signatures` | the most signatures one request may carry; a request with more gets `invalid` | `4` |
 | `max_nonces` | the most nonces remembered at once to detect replays, across all agents | `65536` |
+| `nonce_store` | the module that keeps the nonces in place of this instance's memory; see [Shared nonce store](#shared-nonce-store) | memory |
+| `nonce_store_timeout` | how long one `nonce_store` check may take; needs `nonce_store` | `250ms`, set by Aegis |
 
 Durations take Caddy's units, such as `30s`, `1h` or `2d`, and sizes take
 units such as `64KiB` or `1MB`. Zero and negative values fail config load, and
 so does a `min_ttl` greater than `max_ttl`, where an absent one counts as
 samesame's default. In JSON config, the settings are fields of the
-`web_bot_auth` handler with the same names; `max_directory_size` is in bytes.
+`web_bot_auth` handler with the same names; `max_directory_size` is in bytes,
+and `nonce_store` is an object that names the module in `store`, next to the
+module's own settings: `"nonce_store": {"store": "<name>", ...}`.
 
 A stale key directory is downloaded again when a signed request names it.
 While those downloads fail, samesame keeps using the stale directory, so
@@ -368,17 +375,24 @@ that signature only, for as long as the signature can verify: until
 same agent and has the same nonce gets `invalid` with reason `replay`, which
 `enforce` and `require` block with a `429`. Replay protection is always on.
 
+The nonces are kept in memory by default, which supports one Caddy instance.
+**With several instances, such as behind a load balancer, use `nonce_store`**
+([Shared nonce store](#shared-nonce-store)). With memory, a replay sent to
+another instance gets `verified`. Aegis cannot see other instances, so it cannot
+refuse such a config.
+
 A correctly signed request without a nonce gets `verified`, also when it is
 sent again: nothing tells a replay of it from the original.
 
-All `web_bot_auth` directives with the same `max_nonces`, in any site, share
-the nonces they remember, so a replay gets `replay` whichever of them checks
-it. That matters because a signature that covers only the host, not the path,
-verifies on every path of the site: in the `require` example under
-[Modes](#modes), a signed request with a nonce to a path outside `/feed/`,
-replayed to `/feed/`, gets `replay`, and `require` blocks it. A request that several
-directives check, such as a site-wide `web_bot_auth` and one inside a `handle`
-block, is not a replay of itself: each of them can verify it.
+All `web_bot_auth` directives without `nonce_store` and with the same
+`max_nonces`, in any site, share the nonces they remember, so a replay gets
+`replay` whichever of them checks it. That matters because a signature that
+covers only the host, not the path, verifies on every path of the site: in
+the `require` example under [Modes](#modes), a signed request with a nonce to
+a path outside `/feed/`, replayed to `/feed/`, gets `replay`, and `require`
+blocks it. A request that several directives check, such as a site-wide
+`web_bot_auth` and one inside a `handle` block, is not a replay of itself:
+each of them can verify it.
 
 `max_nonces` sets how many nonces the directives with that value remember at
 once, together. When they remember that many, each new nonce makes them
@@ -395,10 +409,113 @@ other forgets them.
 
 The nonces are kept in memory, which limits the protection:
 
-- A replay sent to another Caddy instance, for example behind a load balancer, gets `verified`.
+- A replay sent to another Caddy instance gets `verified`. Several instances need `nonce_store`, as said above.
 - Directives with different `max_nonces` values remember separate nonces, so a replay sent to a path that a directive with another value checks gets `verified`, once per value.
 - Directives that share nonces but have different `clock_skew` values remember each nonce until `expires` plus the `clock_skew` of the directive that verified it first. Until the larger `clock_skew` also runs out, a replay sent to a directive with that larger value gets `verified`.
 - A config reload forgets the nonces of each `max_nonces` value that no directive of the new config has.
+
+## Shared nonce store
+
+`nonce_store` keeps the nonces in a module of the `http.web_bot_auth.nonce_stores`
+namespace, such as one backed by Redis, in place of this instance's memory.
+Every instance that uses the same store sees the same nonces, so a replay gets
+`replay` whichever instance receives it. Aegis ships no store. Each one is a
+separate Caddy module that you build in, and its own docs list its settings.
+
+```caddyfile
+web_bot_auth {
+	nonce_store <name> {
+		<the module's settings>
+	}
+	nonce_store_timeout 250ms
+}
+```
+
+`max_nonces` sizes the in-memory store and does not apply with `nonce_store`,
+so setting both fails config load. So does `nonce_store_timeout` without
+`nonce_store`.
+
+Directives share nonces by store. Directives whose `nonce_store` modules report
+the same key, which each module defines, read and write the same nonces, and a
+request that several of them check is not a replay of itself, as with memory.
+A directive with `nonce_store` and one without remember separate nonces. A
+config reload keeps the nonces of a store that holds them outside Caddy, and
+the in-memory nonces of directives without `nonce_store` stay as
+[Replay protection](#replay-protection) says.
+
+In a chain of Aegis tiers, such as one Caddy in front of another, each tier
+needs its own store, and with Redis its own `key_prefix`. The second tier sees
+every request after the first has recorded its nonce, so with a shared store it
+gets `replay` for every one.
+
+### When the store fails
+
+When the store returns an error or does not answer within
+`nonce_store_timeout`, a request whose signature verifies and has a nonce gets
+`unverified` with reason `nonce_store`. A correctly signed request without a
+nonce never reaches the store and still gets `verified`. The mode treats
+`nonce_store` as any other `unverified` outcome:
+
+| Mode | Correctly signed request with a nonce while the store fails |
+|---|---|
+| `observe` (default) | passed on as `unverified` |
+| `enforce` | passed on as `unverified` |
+| `require` | blocked with a challenge |
+
+So `require` blocks agents that sign with a nonce until the store answers
+again.
+
+A check waits at most `nonce_store_timeout`, `250ms` by default, also when the
+module ignores the deadline. After a failure, Aegis does not ask the store for
+10s: checks in that time fail at once, without waiting. Once 10s have passed
+since the last failure, one check asks the store again, and the others keep
+failing at once until it ends. If it fails, the 10s start over, and if it gets
+an answer, the store counts as answering again. Directives with the same store
+share this state, also across config reloads. A check that ends because its
+client disconnected does not count as a failure of the store, and a check that
+started before the last failure does not count as an answer.
+
+`web_bot_auth` logs one warning when a store starts failing and one `info`
+line when it answers again, not a line per failed check. Both carry the store's
+key in `store`, and the warning carries the error in `error`.
+
+| Level | Message |
+|---|---|
+| `warn` | `nonce store failed: signed requests get unverified with reason nonce_store until it answers` |
+| `info` | `nonce store answers again` |
+
+Aegis does not fall back to this instance's memory while the store fails. A
+replay sent to another instance would then get `verified`, and the Web Bot Auth
+draft (`draft-ietf-webbotauth-httpsig-protocol-01`, Appendix C.6) rules that
+out: "If that state is unavailable, the verifier should not treat signature
+validation as evidence that replay was detected or prevented."
+
+## Writing a nonce store
+
+A nonce store is a Caddy module with an ID in the `http.web_bot_auth.nonce_stores`
+namespace that implements `aegis.NonceStore`:
+
+```go
+type NonceStore interface {
+	CheckAndRecord(ctx context.Context, scope, nonce string, until time.Time) (bool, error)
+	NonceStoreKey() string
+}
+```
+
+- `scope` is the agent's key directory URL, or `keyid:` and the `keyid` for static keys.
+- `until` is the signature's `expires` plus `clock_skew`, after which the nonce may be forgotten.
+- `CheckAndRecord` must check and record atomically, and return `true` when the nonce is fresh. Aegis calls it concurrently.
+- `ctx` carries the `nonce_store_timeout` deadline. `CheckAndRecord` must return once `ctx` is done.
+- `CheckAndRecord` returns an error only when the store cannot answer. Every error makes the request `unverified` with reason `nonce_store` and counts as the store failing: checks of that store then fail at once for at least 10s, in every directive with the same store, as [When the store fails](#when-the-store-fails) says.
+- `NonceStoreKey` is equal for two stores exactly when they read and write the same nonces. It must not contain secrets, because Aegis logs it.
+
+Aegis applies `nonce_store_timeout` and the skip window around the module, so
+the module needs no timeout of its own.
+
+To be set in a Caddyfile, the module also implements `caddyfile.Unmarshaler`.
+Its `UnmarshalCaddyfile` gets the tokens from `<name>` to the end of the block.
+Without it, a Caddyfile that names the module fails to adapt, and only JSON
+config can use the module.
 
 ## Caddy behind another HTTPS server
 
@@ -524,7 +641,9 @@ Like Caddy's other logs, it writes to stderr unless it sets an `output`:
 ```
 
 The warning that `web_bot_auth` logs for `insecure_transport` is described
-under [Caddy behind another HTTPS server](#caddy-behind-another-https-server).
+under [Caddy behind another HTTPS server](#caddy-behind-another-https-server),
+and the lines it logs when a `nonce_store` fails and answers again under
+[When the store fails](#when-the-store-fails).
 
 ### Access log
 
