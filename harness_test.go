@@ -7,17 +7,22 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/TecharoHQ/samesame"
 	"github.com/caddyserver/caddy/v2"
@@ -177,6 +182,53 @@ func (s site) load(t *testing.T, directives string) {
 	}
 	if err := caddy.Load(cfg, true); err != nil {
 		t.Fatal(err)
+	}
+	waitForOneListener(t, s.url)
+}
+
+// waitForOneListener waits until one socket listens on the port of url.
+// caddy.Load returns before the old config has closed its socket, and Caddy
+// listens on the same port again with SO_REUSEPORT. Linux can hand a new
+// connection to the old socket, which resets it on close or takes the request
+// and closes without an answer. Resending is no fix, because a resent signed
+// request is a replay. The count comes from /proc/net/tcp, so on systems
+// without it the wait is skipped.
+func waitForOneListener(t *testing.T, rawURL string) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// /proc/net/tcp writes the local port as four uppercase hex digits and the
+	// LISTEN state as 0A.
+	suffix := fmt.Sprintf(":%04X", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, err := os.ReadFile("/proc/net/tcp")
+		if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for line := range strings.Lines(string(b)) {
+			f := strings.Fields(line)
+			if len(f) > 3 && strings.HasSuffix(f[1], suffix) && f[3] == "0A" {
+				n++
+			}
+		}
+		if n == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sockets listen on port %d, want 1", n, port)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
